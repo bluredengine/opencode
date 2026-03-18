@@ -399,7 +399,7 @@ export const GodotUIMeasureTool = Tool.define("godot_ui_measure", {
             },
           ],
           temperature: 0.2,
-          maxTokens: 20000,
+          maxOutputTokens: 20000,
           providerOptions: {
             anthropic: {
               thinking: { type: "enabled", budgetTokens: 16000 },

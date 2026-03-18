@@ -7,6 +7,7 @@ import { readProfile, writeProfile, defaultProfile } from "../../provider/asset/
 import { getModelDefaults } from "../../config/model-defaults"
 import { AssetMetadata } from "../../provider/asset/metadata"
 import type { AssetProvider } from "../../provider/asset/asset-provider"
+import { AssetProviderRegistry } from "../../provider/asset"
 import { generateImage } from "../../provider/asset/generate-image"
 
 const log = Log.create({ service: "godot.commands" })

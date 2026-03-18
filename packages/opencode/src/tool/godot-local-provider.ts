@@ -19,20 +19,20 @@ function getBaseUrl(): string {
   return `http://127.0.0.1:${process.env.BLURED_AI_PORT ?? "4096"}`
 }
 
-export const GodotLocalProviderInstallTool: Tool.Info = {
-  id: "godot_install_local_provider",
-  init: async () => ({
-    description: DESCRIPTION,
-    parameters: z.object({
-      provider_id: z
-        .enum(["local_sharp", "local_gifenc", "local_atlas_split", "local_rmbg", "all"])
-        .describe("Which provider to install/start, or 'all' for all providers"),
-      action: z
-        .enum(["install", "start"])
-        .default("install")
-        .describe("'install' installs deps (+ starts RMBG sidecar), 'start' only starts an already-installed provider"),
-    }),
-    execute: async (params) => {
+const Params = z.object({
+  provider_id: z
+    .enum(["local_sharp", "local_gifenc", "local_atlas_split", "local_rmbg", "all"])
+    .describe("Which provider to install/start, or 'all' for all providers"),
+  action: z
+    .enum(["install", "start"])
+    .default("install")
+    .describe("'install' installs deps (+ starts RMBG sidecar), 'start' only starts an already-installed provider"),
+})
+
+export const GodotLocalProviderInstallTool = Tool.define("godot_install_local_provider", {
+  description: DESCRIPTION,
+  parameters: Params,
+  execute: async (params: z.infer<typeof Params>) => {
       const base = getBaseUrl()
       const providerIds =
         params.provider_id === "all"
@@ -124,5 +124,5 @@ export const GodotLocalProviderInstallTool: Tool.Info = {
         metadata: {},
       }
     },
-  }),
-}
+  },
+)

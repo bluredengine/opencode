@@ -202,12 +202,14 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
           title: "Pipeline cancelled",
           metadata: { generationId: genResult.generationId },
           output: "Pipeline was cancelled by user.",
+          attachments: undefined,
         }
       }
       return {
         title: "Pipeline: generation failed",
         metadata: { generationId: genResult.generationId, error: genResult.error, attempt: params.attempt },
         output: `Generation failed (attempt ${params.attempt}/${params.max_retries}): ${genResult.error || "Unknown error"}${params.attempt < params.max_retries ? "\nYou may retry with adjusted prompt." : ""}`,
+        attachments: undefined,
       }
     }
 
@@ -374,7 +376,7 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
       model: modelId,
       generation_id: genResult.generationId,
       parameters: effectiveParameters,
-      usage,
+      usage: usage as AssetProvider.AssetMetadata["usage"],
       created_at: new Date().toISOString(),
       version,
       post_processing: postProcessingLog.map((op) => ({

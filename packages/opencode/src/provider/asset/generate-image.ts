@@ -64,7 +64,7 @@ export async function generateImage(opts: GenerateImageOptions): Promise<Generat
   })
 
   // Poll until complete
-  let status = genResult
+  let status: AssetProvider.GenerationStatus = genResult
   let attempts = 0
   while ((status.status === "pending" || status.status === "processing") && attempts < maxPoll) {
     if (opts.abortSignal?.aborted) {
