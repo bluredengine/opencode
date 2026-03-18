@@ -733,8 +733,183 @@ export const AIAssetRoutes = lazy(() =>
           503,
         )
       }
+    })
+
+    // ── Local Provider Management ────────────────────────────────────────
+
+    // Aggregate health status for all local providers
+    .get("/local-status", async (c) => {
+      const pkgDir = path.resolve(import.meta.dir, "../../..")
+      const rmbgPort = process.env.MAKABAKA_RMBG_PORT ?? "7860"
+      type LocalStatus = { name: string; service: string; status: "ok" | "not_installed" | "installed_not_running" }
+      const results: Record<string, LocalStatus> = {}
+
+      // npm-based providers: check if node_modules exist
+      const npmProviders: { id: string; name: string; service: string; deps: string[] }[] = [
+        { id: "local_sharp", name: "Sharp", service: "Image postprocessing", deps: ["sharp"] },
+        { id: "local_gifenc", name: "GIFenc", service: "GIF recording", deps: ["sharp", "gifenc"] },
+        { id: "local_atlas_split", name: "Atlas Splitter", service: "Sprite sheet splitting", deps: ["sharp", "@techstark/opencv-js"] },
+      ]
+      for (const prov of npmProviders) {
+        let allPresent = true
+        for (const dep of prov.deps) {
+          const depPath = path.join(pkgDir, "node_modules", dep)
+          try {
+            await fs.access(depPath)
+          } catch {
+            allPresent = false
+            break
+          }
+        }
+        results[prov.id] = { name: prov.name, service: prov.service, status: allPresent ? "ok" : "not_installed" }
+      }
+
+      // RMBG: check deps installed AND sidecar running
+      const rmbgDir = path.resolve(pkgDir, "services/rmbg")
+      let rmbgDepsInstalled = false
+      try {
+        // Check if key pip package (transformers) is importable
+        const check = Bun.spawn(["python", "-c", "import transformers"], {
+          cwd: rmbgDir,
+          stdout: "pipe",
+          stderr: "pipe",
+        })
+        await check.exited
+        rmbgDepsInstalled = check.exitCode === 0
+      } catch {
+        rmbgDepsInstalled = false
+      }
+
+      let rmbgRunning = false
+      try {
+        const resp = await fetch(`http://127.0.0.1:${rmbgPort}/health`, { signal: AbortSignal.timeout(3000) })
+        rmbgRunning = resp.ok
+      } catch {
+        rmbgRunning = false
+      }
+
+      if (rmbgRunning) {
+        results["local_rmbg"] = { name: "RMBG-2.0", service: "AI background removal", status: "ok" }
+      } else if (rmbgDepsInstalled) {
+        results["local_rmbg"] = { name: "RMBG-2.0", service: "AI background removal", status: "installed_not_running" }
+      } else {
+        results["local_rmbg"] = { name: "RMBG-2.0", service: "AI background removal", status: "not_installed" }
+      }
+
+      return c.json(results)
+    })
+
+    // Install dependencies for a local provider (+ start sidecar for RMBG)
+    .post("/local-install/:providerId", async (c) => {
+      const providerId = c.req.param("providerId")
+      const pkgDir = path.resolve(import.meta.dir, "../../..")
+
+      const npmInstallMap: Record<string, string[]> = {
+        local_sharp: ["sharp"],
+        local_gifenc: ["sharp", "gifenc"],
+        local_atlas_split: ["sharp", "@techstark/opencv-js"],
+      }
+
+      if (npmInstallMap[providerId]) {
+        const deps = npmInstallMap[providerId]
+        const proc = Bun.spawn(["bun", "add", ...deps], {
+          cwd: pkgDir,
+          stdout: "pipe",
+          stderr: "pipe",
+        })
+        await proc.exited
+        const stdout = await new Response(proc.stdout).text()
+        const stderr = await new Response(proc.stderr).text()
+        if (proc.exitCode !== 0) {
+          return c.json({ success: false, output: stderr || stdout }, 500)
+        }
+        return c.json({ success: true, output: stdout })
+      }
+
+      if (providerId === "local_rmbg") {
+        const rmbgDir = path.resolve(pkgDir, "services/rmbg")
+        const reqFile = path.join(rmbgDir, "requirements.txt")
+        try {
+          await fs.access(reqFile)
+        } catch {
+          return c.json({ success: false, output: "requirements.txt not found" }, 404)
+        }
+
+        // Install pip deps
+        const pipProc = Bun.spawn(["pip", "install", "-r", "requirements.txt"], {
+          cwd: rmbgDir,
+          stdout: "pipe",
+          stderr: "pipe",
+        })
+        await pipProc.exited
+        const pipOut = await new Response(pipProc.stdout).text()
+        const pipErr = await new Response(pipProc.stderr).text()
+        if (pipProc.exitCode !== 0) {
+          return c.json({ success: false, output: pipErr || pipOut }, 500)
+        }
+
+        // Start sidecar after install
+        const startResult = await spawnRmbgSidecarLocal()
+        if (!startResult.success) {
+          return c.json({ success: false, output: `Deps installed but sidecar failed to start: ${startResult.detail}` }, 500)
+        }
+        return c.json({ success: true, output: `Deps installed. ${startResult.detail}` })
+      }
+
+      return c.json({ error: `Unknown provider: ${providerId}` }, 400)
+    })
+
+    // Start an already-installed local provider (RMBG sidecar only)
+    .post("/local-start/:providerId", async (c) => {
+      const providerId = c.req.param("providerId")
+      if (providerId !== "local_rmbg") {
+        return c.json({ error: "Only local_rmbg requires explicit start" }, 400)
+      }
+      const result = await spawnRmbgSidecarLocal()
+      return c.json({ success: result.success, detail: result.detail }, result.success ? 200 : 500)
     }),
 )
+
+// Spawn RMBG sidecar and poll health until ready (standalone, no Server import)
+async function spawnRmbgSidecarLocal(): Promise<{ success: boolean; detail: string }> {
+  const pkgDir = path.resolve(import.meta.dir, "../../..")
+  const rmbgDir = path.resolve(pkgDir, "services/rmbg")
+  const mainPy = path.join(rmbgDir, "main.py")
+  const rmbgPort = process.env.MAKABAKA_RMBG_PORT ?? "7860"
+
+  try {
+    await fs.access(mainPy)
+  } catch {
+    return { success: false, detail: "RMBG main.py not found" }
+  }
+
+  // Check if already running
+  try {
+    const resp = await fetch(`http://127.0.0.1:${rmbgPort}/health`, { signal: AbortSignal.timeout(2000) })
+    if (resp.ok) return { success: true, detail: "RMBG sidecar already running" }
+  } catch {
+    // Not running, will start
+  }
+
+  Bun.spawn(["python", "main.py"], {
+    cwd: rmbgDir,
+    env: { ...process.env, MAKABAKA_RMBG_PORT: rmbgPort },
+    stdout: "inherit",
+    stderr: "inherit",
+  })
+
+  // Poll health for up to 60s
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 2000))
+    try {
+      const resp = await fetch(`http://127.0.0.1:${rmbgPort}/health`, { signal: AbortSignal.timeout(2000) })
+      if (resp.ok) return { success: true, detail: "RMBG sidecar started successfully" }
+    } catch {
+      // Not ready yet
+    }
+  }
+  return { success: false, detail: "RMBG sidecar failed to start within 60s" }
+}
 
 function resolveAssetPath(resPath: string): string {
   const projectRoot = Instance.directory
