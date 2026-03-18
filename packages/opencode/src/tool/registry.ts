@@ -27,6 +27,30 @@ import { LspTool } from "./lsp"
 import { Truncate } from "./truncation"
 import { PlanExitTool, PlanEnterTool } from "./plan"
 import { ApplyPatchTool } from "./apply_patch"
+import { GodotAssetImportTool, GodotAssetImportBatchTool } from "./godot-asset-import"
+import { GodotEditorCommandTool, GodotTestCommandTool } from "./godot-editor-command"
+import { GodotScreenshotTool } from "./godot-screenshot"
+import { SimTool } from "./sim"
+import { GodotRecordTool } from "./godot-record"
+import { GodotLogsTool } from "./godot-logs"
+import { GodotGameDesignTool, GodotCreationProgressTool } from "./godot-game-design"
+import { GodotAssetPostprocessTool, GodotAssetRemoveBgTool } from "./godot-asset-postprocess"
+import { GodotAssetPipelineTool } from "./godot-asset-pipeline"
+import { GodotAtlasSplitTool } from "./godot-atlas-split"
+import { GodotUIMeasureTool } from "./godot-ui-measure"
+import {
+  GodotAssetCreatePlaceholderTool,
+  GodotAssetTransformTool,
+  GodotAssetRefinePromptTool,
+  GodotAssetListModelsTool,
+  GodotWorldbuildingTool,
+  GodotArtExploreTool,
+  GodotArtRefineTool,
+  GodotArtConfirmTool,
+  GodotStyleSetTool,
+  GodotAssetReviewTool,
+  GodotCornerstoneGenerateTool,
+} from "./godot-ai-asset"
 
 export namespace ToolRegistry {
   const log = Log.create({ service: "tool.registry" })
@@ -118,6 +142,39 @@ export namespace ToolRegistry {
       ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
       ...(config.experimental?.batch_tool === true ? [BatchTool] : []),
       ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [PlanExitTool, PlanEnterTool] : []),
+      // Godot AI Asset tools
+      GodotAssetImportTool,
+      GodotAssetImportBatchTool,
+      GodotAssetCreatePlaceholderTool,
+      GodotAssetTransformTool,
+      GodotAssetRefinePromptTool,
+      GodotAssetListModelsTool,
+      // Godot Art Director tools
+      GodotWorldbuildingTool,
+      GodotArtExploreTool,
+      GodotArtRefineTool,
+      GodotArtConfirmTool,
+      GodotStyleSetTool,
+      GodotAssetReviewTool,
+      GodotCornerstoneGenerateTool,
+      GodotEditorCommandTool,
+      GodotTestCommandTool,
+      GodotScreenshotTool,
+      SimTool,
+      GodotRecordTool,
+      GodotLogsTool,
+      // Godot Asset Post-Processing tools
+      GodotAssetPostprocessTool,
+      GodotAssetRemoveBgTool,
+      // Godot Asset Pipeline (generate → postprocess → score)
+      GodotAssetPipelineTool,
+      // Godot Atlas Split (OpenCV-based element detection)
+      GodotAtlasSplitTool,
+      // Godot UI Measurement (vision-based layout analysis)
+      GodotUIMeasureTool,
+      // Godot Game Creation tools
+      GodotGameDesignTool,
+      GodotCreationProgressTool,
       ...custom,
     ]
   }
@@ -132,11 +189,20 @@ export namespace ToolRegistry {
       modelID: string
     },
     agent?: Agent.Info,
+    options?: { autotest?: boolean },
   ) {
     const tools = await all()
     const result = await Promise.all(
       tools
         .filter((t) => {
+          // Test-only tools: only visible when auto-test is enabled
+          if (t.testOnly && !options?.autotest) return false
+
+          // Agent-scoped tools: only visible to specified agents
+          if (t.agents && t.agents.length > 0) {
+            if (!agent || !t.agents.includes(agent.name)) return false
+          }
+
           // Enable websearch/codesearch for zen users OR via enable flag
           if (t.id === "codesearch" || t.id === "websearch") {
             return model.providerID === "opencode" || Flag.OPENCODE_ENABLE_EXA

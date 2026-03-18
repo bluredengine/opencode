@@ -46,6 +46,8 @@ import { LLM } from "./llm"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
+import { AutoTest } from "./auto-test"
+import { compressImageBase64 } from "@/util/image"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -102,6 +104,7 @@ export namespace SessionPrompt {
       ),
     system: z.string().optional(),
     variant: z.string().optional(),
+    autotest: z.boolean().optional(),
     parts: z.array(
       z.discriminatedUnion("type", [
         MessageV2.TextPart.omit({
@@ -564,6 +567,7 @@ export namespace SessionPrompt {
         processor,
         bypassAgentCheck,
         messages: msgs,
+        autotest: lastUser.autotest,
       })
 
       if (step === 1) {
@@ -601,9 +605,13 @@ export namespace SessionPrompt {
         agent,
         abort,
         sessionID,
-        system: [...(await SystemPrompt.environment(model)), ...(await InstructionPrompt.system())],
+        system: [
+          ...(await SystemPrompt.environment(model)),
+          ...(await InstructionPrompt.system()),
+          ...(lastUser.autotest ? [AutoTest.INSTRUCTION] : []),
+        ],
         messages: [
-          ...MessageV2.toModelMessages(sessionMessages, model),
+          ...(await MessageV2.toModelMessages(sessionMessages, model)),
           ...(isLastStep
             ? [
                 {
@@ -616,7 +624,11 @@ export namespace SessionPrompt {
         tools,
         model,
       })
-      if (result === "stop") break
+      if (result === "stop") {
+        // Auto-test disabled for now - use manual "Verify" button in Godot editor
+        // TODO: Re-enable with smarter triggering (only after code changes)
+        break
+      }
       if (result === "compact") {
         await SessionCompaction.create({
           sessionID,
@@ -654,6 +666,7 @@ export namespace SessionPrompt {
     processor: SessionProcessor.Info
     bypassAgentCheck: boolean
     messages: MessageV2.WithParts[]
+    autotest?: boolean
   }) {
     using _ = log.time("resolveTools")
     const tools: Record<string, AITool> = {}
@@ -696,8 +709,16 @@ export namespace SessionPrompt {
     for (const item of await ToolRegistry.tools(
       { modelID: input.model.api.id, providerID: input.model.providerID },
       input.agent,
+      { autotest: input.autotest },
     )) {
-      const schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
+      // Skip tools with invalid parameters schema
+      let schema: any
+      try {
+        schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
+      } catch (e) {
+        log.warn("skipping tool with invalid parameters schema", { toolId: item.id, error: String(e) })
+        continue
+      }
       tools[item.id] = tool({
         id: item.id as any,
         description: item.description,
@@ -776,13 +797,14 @@ export namespace SessionPrompt {
           if (contentItem.type === "text") {
             textParts.push(contentItem.text)
           } else if (contentItem.type === "image") {
+            const compressed = await compressImageBase64(contentItem.data, contentItem.mimeType)
             attachments.push({
               id: Identifier.ascending("part"),
               sessionID: input.session.id,
               messageID: input.processor.message.id,
               type: "file",
-              mime: contentItem.mimeType,
-              url: `data:${contentItem.mimeType};base64,${contentItem.data}`,
+              mime: compressed.mime,
+              url: `data:${compressed.mime};base64,${compressed.data}`,
             })
           } else if (contentItem.type === "resource") {
             const { resource } = contentItem
@@ -838,6 +860,7 @@ export namespace SessionPrompt {
       model: input.model ?? agent.model ?? (await lastModel(input.sessionID)),
       system: input.system,
       variant: input.variant,
+      autotest: input.autotest,
     }
 
     const parts = await Promise.all(
@@ -1798,7 +1821,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         },
         ...(hasOnlySubtaskParts
           ? [{ role: "user" as const, content: subtaskParts.map((p) => p.prompt).join("\n") }]
-          : MessageV2.toModelMessages(contextMessages, model)),
+          : await MessageV2.toModelMessages(contextMessages, model)),
       ],
     })
     const text = await result.text.catch((err) => log.error("failed to generate title", { error: err }))

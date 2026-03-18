@@ -1038,12 +1038,35 @@ export namespace Config {
           url: z.string().optional().describe("Enterprise URL"),
         })
         .optional(),
+      asset_provider: z
+        .record(
+          z.string(),
+          z.object({
+            api_key_env: z.string().optional().describe("Environment variable name for API key"),
+            api_key: z.string().optional().describe("Direct API key (synced from editor settings)"),
+            api_url: z.string().optional().describe("Override base API URL"),
+            enabled: z.boolean().default(true),
+            default_models: z
+              .record(z.string(), z.string())
+              .optional()
+              .describe("Default model per asset type for this provider"),
+          }),
+        )
+        .optional()
+        .describe("Asset generation provider configurations (replicate, meshy, doubao, suno)"),
       compaction: z
         .object({
           auto: z.boolean().optional().describe("Enable automatic compaction when context is full (default: true)"),
           prune: z.boolean().optional().describe("Enable pruning of old tool outputs (default: true)"),
         })
         .optional(),
+      services: z
+        .object({
+          image_model: z.string().optional().describe("Image generation model ID (e.g. 'nano-banana-2', 'nano-banana-pro')"),
+          removebg_method: z.enum(["replicate", "local"]).optional().describe("Background removal method: 'replicate' for Replicate bria/rmbg-2.0, 'local' for RMBG-2.0 sidecar"),
+        })
+        .optional()
+        .describe("Service settings for asset pipeline (removebg, etc.)"),
       experimental: z
         .object({
           hook: z
@@ -1261,7 +1284,7 @@ export namespace Config {
   }
 
   export async function update(config: Info) {
-    const filepath = path.join(Instance.directory, "config.json")
+    const filepath = path.join(Instance.directory, "opencode.json")
     const existing = await loadFile(filepath)
     await Bun.write(filepath, JSON.stringify(mergeDeep(existing, config), null, 2))
     await Instance.dispose()
