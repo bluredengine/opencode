@@ -99,7 +99,7 @@ export const GodotAssetGenerateTool = Tool.define("godot_asset_generate", {
     })
 
     // 3. Poll until complete
-    let status = result
+    let status: AssetProvider.GenerationStatus = result
     while (status.status === "pending" || status.status === "processing") {
       await new Promise((resolve) => setTimeout(resolve, 2000))
       status = await provider.checkStatus(result.generationId)
@@ -382,7 +382,7 @@ export const GodotAssetRegenerateTool = Tool.define("godot_asset_regenerate", {
     })
 
     // 4. Poll
-    let status = result
+    let status: AssetProvider.GenerationStatus = result
     while (status.status === "pending" || status.status === "processing") {
       await new Promise((resolve) => setTimeout(resolve, 2000))
       status = await provider.checkStatus(result.generationId)
@@ -509,7 +509,7 @@ export const GodotAssetTransformTool = Tool.define("godot_asset_transform", {
     })
 
     // Poll
-    let status = result
+    let status: AssetProvider.GenerationStatus = result
     while (status.status === "pending" || status.status === "processing") {
       await new Promise((resolve) => setTimeout(resolve, 2000))
       status = await provider.checkStatus(result.generationId)

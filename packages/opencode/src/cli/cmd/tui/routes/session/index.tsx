@@ -1776,7 +1776,7 @@ function Task(props: ToolProps<typeof TaskTool>) {
   const { navigate } = useRoute()
   const local = useLocal()
 
-  const current = createMemo(() => props.metadata.summary?.findLast((x) => x.state.status !== "pending"))
+  const current = createMemo(() => props.metadata.summary?.findLast((x: any) => x.state.status !== "pending"))
   const color = createMemo(() => local.agent.color(props.input.subagent_type ?? "unknown"))
 
   return (
@@ -1842,7 +1842,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
   const diagnostics = createMemo(() => {
     const filePath = Filesystem.normalizePath(props.input.filePath ?? "")
     const arr = props.metadata.diagnostics?.[filePath] ?? []
-    return arr.filter((x) => x.severity === 1).slice(0, 3)
+    return arr.filter((x: any) => x.severity === 1).slice(0, 3)
   })
 
   return (

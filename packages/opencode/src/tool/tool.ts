@@ -33,10 +33,10 @@ export namespace Tool {
       parameters: Parameters
       execute(
         args: z.infer<Parameters>,
-        ctx: Context,
+        ctx: Context<M>,
       ): Promise<{
         title: string
-        metadata: M
+        metadata: Metadata
         output: string
         attachments?: MessageV2.FilePart[]
       }>
