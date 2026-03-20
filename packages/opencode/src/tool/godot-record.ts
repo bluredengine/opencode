@@ -29,21 +29,22 @@ async function pollForRecordResult(id: string, timeoutMs: number): Promise<strin
 }
 
 async function encodeFramesToGif(base64Frames: string[], fps: number): Promise<string> {
-  const { GIFEncoder, quantize, applyPalette } = await import("gifenc")
-  const sharp = (await import("sharp")).default
+  const { GIFEncoder, quantize, applyPalette } = await import("../util/gifenc")
+  const { GodotImage } = await import("../util/godot-image")
 
   // Decode first frame to get dimensions
   const firstBuf = Buffer.from(base64Frames[0], "base64")
-  const firstMeta = await sharp(firstBuf).metadata()
-  const width = firstMeta.width!
-  const height = firstMeta.height!
+  const firstDecoded = await GodotImage.decodeToRGBA(firstBuf)
+  const width = firstDecoded.width
+  const height = firstDecoded.height
 
   const gif = GIFEncoder()
   const delay = Math.round(1000 / fps)
 
   for (const frame of base64Frames) {
     const buf = Buffer.from(frame, "base64")
-    const rgba = await sharp(buf).ensureAlpha().raw().toBuffer()
+    const decoded = await GodotImage.decodeToRGBA(buf)
+    const rgba = new Uint8Array(decoded.data)
     const palette = quantize(rgba, 256)
     const indexed = applyPalette(rgba, palette)
     gif.writeFrame(indexed, width, height, { palette, delay })

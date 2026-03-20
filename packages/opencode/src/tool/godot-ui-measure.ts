@@ -253,7 +253,6 @@ export const GodotUIMeasureTool = Tool.define("godot_ui_measure", {
     const absImagePath = resolveResPath(params.reference_image)
 
     // 2. Read image and get dimensions
-    const sharp = (await import("sharp")).default
     let imageBuffer: Buffer
     try {
       imageBuffer = Buffer.from(await fs.readFile(absImagePath))
@@ -265,9 +264,10 @@ export const GodotUIMeasureTool = Tool.define("godot_ui_measure", {
       }
     }
 
-    const meta = await sharp(imageBuffer).metadata()
-    const refWidth = meta.width!
-    const refHeight = meta.height!
+    const { GodotImage } = await import("../util/godot-image")
+    const meta = await GodotImage.metadata(imageBuffer)
+    const refWidth = meta.width
+    const refHeight = meta.height
     const scaleFactor = params.viewport_height / refHeight
 
     ctx.metadata({

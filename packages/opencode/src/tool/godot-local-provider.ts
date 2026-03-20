@@ -3,12 +3,12 @@ import { Tool } from "./tool"
 
 const DESCRIPTION = `Install and start local AI provider dependencies for the Blured Engine.
 
-Use this tool when the user asks to install, set up, or start local providers (Sharp, GIFenc, Atlas Splitter, RMBG-2.0).
+Use this tool when the user asks to install, set up, or start local providers (RMBG-2.0).
 
 Local providers:
-- local_sharp: Image postprocessing (trim, resize, crop, pad) -- needs \`sharp\` npm package
-- local_gifenc: GIF recording -- needs \`sharp\` + \`gifenc\` npm packages
-- local_atlas_split: Sprite sheet splitting -- needs \`sharp\` + \`@techstark/opencv-js\` npm packages
+- local_sharp: Image postprocessing -- built-in via Godot (no install needed)
+- local_gifenc: GIF recording -- built-in (gifenc inlined, no install needed)
+- local_atlas_split: Sprite sheet splitting -- built-in via Godot (no install needed)
 - local_rmbg: AI background removal (RMBG-2.0) -- needs Python + pip packages, plus a running sidecar process
 
 Actions:
