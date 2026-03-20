@@ -28,26 +28,62 @@ async function pollForRecordResult(id: string, timeoutMs: number): Promise<strin
   throw new Error(`Recording poll timed out after ${timeoutMs}ms.`)
 }
 
+// Parse raw RGBA frame: 8-byte header (uint32 LE width + uint32 LE height) + RGBA pixels.
+function tryParseRawRGBA(buf: Buffer): { width: number; height: number; rgba: Uint8Array } | null {
+  if (buf.length < 8) return null
+  const width = buf.readUInt32LE(0)
+  const height = buf.readUInt32LE(4)
+  if (buf.length !== 8 + width * height * 4) return null
+  return { width, height, rgba: new Uint8Array(buf.buffer, buf.byteOffset + 8, width * height * 4) }
+}
+
 async function encodeFramesToGif(base64Frames: string[], fps: number): Promise<string> {
   const { GIFEncoder, quantize, applyPalette } = await import("../util/gifenc")
-  const { GodotImage } = await import("../util/godot-image")
-
-  // Decode first frame to get dimensions
-  const firstBuf = Buffer.from(base64Frames[0], "base64")
-  const firstDecoded = await GodotImage.decodeToRGBA(firstBuf)
-  const width = firstDecoded.width
-  const height = firstDecoded.height
 
   const gif = GIFEncoder()
   const delay = Math.round(1000 / fps)
+  let width = 0
+  let height = 0
 
-  for (const frame of base64Frames) {
-    const buf = Buffer.from(frame, "base64")
-    const decoded = await GodotImage.decodeToRGBA(buf)
-    const rgba = new Uint8Array(decoded.data)
+  // Detect format from first frame
+  const firstBuf = Buffer.from(base64Frames[0], "base64")
+  const firstRaw = tryParseRawRGBA(firstBuf)
+
+  if (firstRaw) {
+    // Fast path: raw RGBA frames -- no decoding needed.
+    width = firstRaw.width
+    height = firstRaw.height
+    const palette = quantize(firstRaw.rgba, 256)
+    const indexed = applyPalette(firstRaw.rgba, palette)
+    gif.writeFrame(indexed, width, height, { palette, delay })
+
+    for (let i = 1; i < base64Frames.length; i++) {
+      const buf = Buffer.from(base64Frames[i], "base64")
+      const parsed = tryParseRawRGBA(buf)
+      if (!parsed) continue
+      const pal = quantize(parsed.rgba, 256)
+      const idx = applyPalette(parsed.rgba, pal)
+      gif.writeFrame(idx, width, height, { palette: pal, delay })
+    }
+  } else {
+    // Legacy path: PNG frames -- decode via Godot.
+    const { GodotImage } = await import("../util/godot-image")
+    const firstDecoded = await GodotImage.decodeToRGBA(firstBuf)
+    width = firstDecoded.width
+    height = firstDecoded.height
+    const rgba = new Uint8Array(firstDecoded.data)
     const palette = quantize(rgba, 256)
     const indexed = applyPalette(rgba, palette)
     gif.writeFrame(indexed, width, height, { palette, delay })
+
+    for (let i = 1; i < base64Frames.length; i++) {
+      const buf = Buffer.from(base64Frames[i], "base64")
+      const decoded = await GodotImage.decodeToRGBA(buf)
+      const r = new Uint8Array(decoded.data)
+      const pal = quantize(r, 256)
+      const idx = applyPalette(r, pal)
+      gif.writeFrame(idx, width, height, { palette: pal, delay })
+    }
   }
 
   gif.finish()
