@@ -615,6 +615,7 @@ export const AIAssetRoutes = lazy(() =>
         return c.json({ error: "model is required" }, 400)
       }
       await Config.update({ services: { image_model: model } } as any)
+      Config.state.reset()
       return c.json({ success: true, model })
     })
 
@@ -631,61 +632,37 @@ export const AIAssetRoutes = lazy(() =>
         return c.json({ error: "method must be 'replicate' or 'local'" }, 400)
       }
       await Config.update({ services: { removebg_method: method } } as any)
+      Config.state.reset()
       return c.json({ success: true, method })
     })
 
-    // Check if local sharp (image postprocessing: trim, resize, crop, pad) is available
+    // Wizard saves multiple settings atomically and forces config reload
+    .post("/wizard-settings", async (c) => {
+      const body = await c.req.json<{ image_model?: string; removebg_method?: string }>()
+      const updates: Record<string, unknown> = {}
+      if (body.image_model) updates.image_model = body.image_model
+      if (body.removebg_method) updates.removebg_method = body.removebg_method
+      if (Object.keys(updates).length > 0) {
+        await Config.update({ services: updates } as any)
+        // Force state reset so next GET reads fresh config
+        Config.state.reset()
+      }
+      return c.json({ success: true, ...updates })
+    })
+
+    // Image processing health: now handled by Godot's native Image class (always available when connected)
     .get("/sharp-health", async (c) => {
-      try {
-        const pkgDir = path.resolve(import.meta.dir, "../../..")
-        const sharpPath = path.join(pkgDir, "node_modules", "sharp")
-        const { access } = await import("fs/promises")
-        await access(sharpPath)
-        return c.json({ status: "ok", detail: "Sharp available" })
-      } catch (e: any) {
-        return c.json(
-          { status: "error", detail: e?.message ?? String(e) },
-          503,
-        )
-      }
+      return c.json({ status: "ok", detail: "Image processing via Godot (built-in)" })
     })
 
-    // Check if local gifenc (GIF recording: sharp + gifenc) is available
+    // GIF encoding health: gifenc is now inlined (always available)
     .get("/gifenc-health", async (c) => {
-      try {
-        const pkgDir = path.resolve(import.meta.dir, "../../..")
-        const sharpPath = path.join(pkgDir, "node_modules", "sharp")
-        const gifencPath = path.join(pkgDir, "node_modules", "gifenc")
-        const { access } = await import("fs/promises")
-        await access(sharpPath)
-        await access(gifencPath)
-        return c.json({ status: "ok", detail: "GIF encoder available" })
-      } catch (e: any) {
-        return c.json(
-          { status: "error", detail: e?.message ?? String(e) },
-          503,
-        )
-      }
+      return c.json({ status: "ok", detail: "GIF encoder built-in (gifenc inlined)" })
     })
 
-    // Check if local Atlas Splitter (OpenCV WASM + sharp) is available
+    // Atlas splitter health: now handled by Godot's connected-component labeling (always available when connected)
     .get("/atlas-split-health", async (c) => {
-      try {
-        // Atlas splitter uses @techstark/opencv-js (WASM) and sharp in a Node subprocess.
-        // Verify the key dependencies can be resolved from the package dir.
-        const pkgDir = path.resolve(import.meta.dir, "../../..")
-        const opencvPath = path.join(pkgDir, "node_modules", "@techstark", "opencv-js")
-        const sharpPath = path.join(pkgDir, "node_modules", "sharp")
-        const { access } = await import("fs/promises")
-        await access(opencvPath)
-        await access(sharpPath)
-        return c.json({ status: "ok", detail: "Atlas splitter available" })
-      } catch (e: any) {
-        return c.json(
-          { status: "error", detail: e?.message ?? String(e) },
-          503,
-        )
-      }
+      return c.json({ status: "ok", detail: "Atlas splitter via Godot (built-in)" })
     })
 
     // Check if local RMBG-2.0 service is running
@@ -744,25 +721,10 @@ export const AIAssetRoutes = lazy(() =>
       type LocalStatus = { name: string; service: string; status: "ok" | "not_installed" | "installed_not_running" }
       const results: Record<string, LocalStatus> = {}
 
-      // npm-based providers: check if node_modules exist
-      const npmProviders: { id: string; name: string; service: string; deps: string[] }[] = [
-        { id: "local_sharp", name: "Sharp", service: "Image postprocessing", deps: ["sharp"] },
-        { id: "local_gifenc", name: "GIFenc", service: "GIF recording", deps: ["sharp", "gifenc"] },
-        { id: "local_atlas_split", name: "Atlas Splitter", service: "Sprite sheet splitting", deps: ["sharp", "@techstark/opencv-js"] },
-      ]
-      for (const prov of npmProviders) {
-        let allPresent = true
-        for (const dep of prov.deps) {
-          const depPath = path.join(pkgDir, "node_modules", dep)
-          try {
-            await fs.access(depPath)
-          } catch {
-            allPresent = false
-            break
-          }
-        }
-        results[prov.id] = { name: prov.name, service: prov.service, status: allPresent ? "ok" : "not_installed" }
-      }
+      // Image processing, GIF encoding, and atlas splitting are now built-in via Godot
+      results["local_sharp"] = { name: "Image Processing", service: "Image postprocessing (via Godot)", status: "ok" }
+      results["local_gifenc"] = { name: "GIF Encoder", service: "GIF recording (gifenc inlined)", status: "ok" }
+      results["local_atlas_split"] = { name: "Atlas Splitter", service: "Sprite sheet splitting (via Godot)", status: "ok" }
 
       // RMBG: check deps installed AND sidecar running
       const rmbgDir = path.resolve(pkgDir, "services/rmbg")
@@ -805,9 +767,7 @@ export const AIAssetRoutes = lazy(() =>
       const pkgDir = path.resolve(import.meta.dir, "../../..")
 
       const npmInstallMap: Record<string, string[]> = {
-        local_sharp: ["sharp"],
-        local_gifenc: ["sharp", "gifenc"],
-        local_atlas_split: ["sharp", "@techstark/opencv-js"],
+        // sharp, gifenc, and opencv are no longer needed — they're built into Godot/OpenCode
       }
 
       if (npmInstallMap[providerId]) {

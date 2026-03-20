@@ -11,6 +11,7 @@ import { Identifier } from "../id/id"
 import type { MessageV2 } from "../session/message-v2"
 import { Auth } from "../auth"
 import { getRemoveBgMethod, getImageModel } from "../server/routes/ai-assets"
+import { Server } from "../server/server"
 
 // =============================================================================
 // Helpers
@@ -216,8 +217,8 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
     const provider = { id: genResult.provider }
     const modelId = genResult.model
     let imageBuffer = genResult.data
-    const sharp = (await import("sharp")).default
-    const rawMeta = await sharp(imageBuffer).metadata()
+    const { GodotImage } = await import("../util/godot-image")
+    const rawMeta = await GodotImage.metadata(imageBuffer)
     const postProcessingLog: string[] = []
 
     // ── Step 3: Fixed post-processing pipeline ──────────────────────────
@@ -225,7 +226,7 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
     ctx.metadata({ title: `Pipeline: post-processing (attempt ${params.attempt}/${params.max_retries})...` })
 
     // 3a. Remove background → transparent
-    // Method is determined by user config: "replicate" uses Replicate bria/rmbg-2.0, "local" uses RMBG-2.0 sidecar
+    // Method is determined by user config: "replicate" uses Replicate bria/remove-background, "local" uses RMBG-2.0 sidecar
     if (transparent_bg) {
       const removeBgMethod = await getRemoveBgMethod()
       const replicateAuth = await Auth.get("replicate")
@@ -237,26 +238,45 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
           const Replicate = (await import("replicate")).default
           const client = new Replicate({ auth: replicateKey })
           const dataUrl = `data:image/png;base64,${imageBuffer.toString("base64")}`
-          const output = await client.run("bria-ai/rmbg-2.0", { input: { image: dataUrl } })
-          let outputUrl: string
-          if (typeof output === "string") {
-            outputUrl = output
-          } else if (output && typeof output === "object" && "url" in (output as any)) {
-            outputUrl = String((output as any).url())
+          const output = await client.run("bria/remove-background", { input: { image: dataUrl } })
+          // Output can be a ReadableStream, a FileOutput (with .url()), or a URL string
+          if (output instanceof ReadableStream) {
+            const chunks: Uint8Array[] = []
+            const reader = output.getReader()
+            while (true) {
+              const { done, value } = await reader.read()
+              if (done) break
+              chunks.push(value)
+            }
+            const totalLen = chunks.reduce((s, c) => s + c.length, 0)
+            const merged = new Uint8Array(totalLen)
+            let offset = 0
+            for (const c of chunks) {
+              merged.set(c, offset)
+              offset += c.length
+            }
+            imageBuffer = Buffer.from(merged)
           } else {
-            outputUrl = String(output)
+            let outputUrl: string
+            if (typeof output === "string") {
+              outputUrl = output
+            } else if (output && typeof output === "object" && "url" in (output as any)) {
+              outputUrl = String((output as any).url())
+            } else {
+              outputUrl = String(output)
+            }
+            const dlResponse = await fetch(outputUrl)
+            if (!dlResponse.ok) {
+              throw new Error(`Failed to download result from Replicate (${dlResponse.status})`)
+            }
+            imageBuffer = Buffer.from(await dlResponse.arrayBuffer())
           }
-          const dlResponse = await fetch(outputUrl)
-          if (!dlResponse.ok) {
-            throw new Error(`Failed to download result from Replicate (${dlResponse.status})`)
-          }
-          imageBuffer = Buffer.from(await dlResponse.arrayBuffer())
           postProcessingLog.push(shouldCrop ? "remove_bg+crop(replicate)" : "remove_bg(replicate)")
         } catch (e: any) {
           console.warn(`[pipeline] Replicate background removal failed, trying local: ${e?.message ?? e}`)
           // Fall back to local RMBG
           try {
-            const rmbgResponse = await fetch("http://127.0.0.1:4096/ai-assets/remove-background", {
+            const rmbgResponse = await fetch(`${Server.url().origin}/ai-assets/remove-background`, {
               method: "POST",
               headers: { "Content-Type": "image/png" },
               body: new Uint8Array(imageBuffer),
@@ -275,7 +295,7 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
       } else {
         // Local RMBG-2.0 sidecar (default, or fallback when no Replicate key)
         try {
-          const rmbgResponse = await fetch("http://127.0.0.1:4096/ai-assets/remove-background", {
+          const rmbgResponse = await fetch(`${Server.url().origin}/ai-assets/remove-background`, {
             method: "POST",
             headers: { "Content-Type": "image/png" },
             body: new Uint8Array(imageBuffer),
@@ -293,49 +313,40 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
       }
     }
 
-    // 3b. Trim transparent pixels
+    // 3b-d. Trim, resize, and pad via single Godot pipeline
     {
-      const trimmed = sharp(imageBuffer).trim()
-      const trimInfo = await trimmed.toBuffer({ resolveWithObject: true })
-      imageBuffer = trimInfo.data
+      const ops: import("../util/godot-image").ImageOperation[] = [{ op: "trim" }]
       postProcessingLog.push("trim")
-    }
 
-    // 3c. Resize to fit within target dimensions (keep aspect ratio)
-    if ((targetW || targetH) && matchSize) {
-      imageBuffer = await sharp(imageBuffer)
-        .resize(targetW ?? null, targetH ?? null, {
-          fit: "inside",
-          withoutEnlargement: false,
-          background: { r: 0, g: 0, b: 0, alpha: 0 },
-        })
-        .png()
-        .toBuffer()
-      postProcessingLog.push(`resize(${targetW ?? "auto"}x${targetH ?? "auto"}, inside)`)
-    }
+      if ((targetW || targetH) && matchSize) {
+        ops.push({ op: "resize", width: targetW ?? 0, height: targetH ?? 0, fit: "inside" })
+        postProcessingLog.push(`resize(${targetW ?? "auto"}x${targetH ?? "auto"}, inside)`)
+      }
 
-    // 3d. Pad to exact target dimensions with transparent pixels
-    if (targetW && targetH && matchSize) {
-      const currentMeta = await sharp(imageBuffer).metadata()
-      const cw = currentMeta.width ?? targetW
-      const ch = currentMeta.height ?? targetH
-      const padLeft = Math.floor((targetW - cw) / 2)
-      const padTop = Math.floor((targetH - ch) / 2)
-      const padRight = targetW - cw - padLeft
-      const padBottom = targetH - ch - padTop
+      // Apply trim+resize first to get intermediate dimensions for padding calc
+      const trimResizeResult = await GodotImage.pipeline(
+        { base64: imageBuffer.toString("base64") },
+        ops,
+      )
+      imageBuffer = Buffer.from(trimResizeResult.data, "base64")
 
-      if (padLeft > 0 || padTop > 0 || padRight > 0 || padBottom > 0) {
-        imageBuffer = await sharp(imageBuffer)
-          .extend({
-            top: Math.max(0, padTop),
-            bottom: Math.max(0, padBottom),
-            left: Math.max(0, padLeft),
-            right: Math.max(0, padRight),
-            background: { r: 0, g: 0, b: 0, alpha: 0 },
-          })
-          .png()
-          .toBuffer()
-        postProcessingLog.push(`pad(${padTop},${padRight},${padBottom},${padLeft})`)
+      // Pad to exact target dimensions with transparent pixels
+      if (targetW && targetH && matchSize) {
+        const cw = trimResizeResult.metadata.width
+        const ch = trimResizeResult.metadata.height
+        const padLeft = Math.floor((targetW - cw) / 2)
+        const padTop = Math.floor((targetH - ch) / 2)
+        const padRight = targetW - cw - padLeft
+        const padBottom = targetH - ch - padTop
+
+        if (padLeft > 0 || padTop > 0 || padRight > 0 || padBottom > 0) {
+          const padResult = await GodotImage.pipeline(
+            { base64: imageBuffer.toString("base64") },
+            [{ op: "pad", top: Math.max(0, padTop), bottom: Math.max(0, padBottom), left: Math.max(0, padLeft), right: Math.max(0, padRight), color: "#00000000" }],
+          )
+          imageBuffer = Buffer.from(padResult.data, "base64")
+          postProcessingLog.push(`pad(${padTop},${padRight},${padBottom},${padLeft})`)
+        }
       }
     }
 
@@ -364,7 +375,7 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
     const relPath = path.relative(projectRoot, destPath)
     const resPath = `res://${relPath.replace(/\\/g, "/")}`
 
-    const finalMeta = await sharp(imageBuffer).metadata()
+    const finalMeta = await GodotImage.metadata(imageBuffer)
 
     // Write metadata (preserve usage from placeholder if present)
     const assetMetadata: AssetProvider.AssetMetadata = {

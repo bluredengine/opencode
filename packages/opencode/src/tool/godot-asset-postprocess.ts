@@ -6,6 +6,7 @@ import { Instance } from "../project/instance"
 import { AssetMetadata } from "../provider/asset/metadata"
 import { Auth } from "../auth"
 import { getRemoveBgMethod } from "../server/routes/ai-assets"
+import { Server } from "../server/server"
 
 // =============================================================================
 // Helpers
@@ -95,66 +96,40 @@ Examples:
     // Save version before modifying
     await AssetMetadata.saveVersion(absPath)
 
-    // Lazy-load sharp
-    const sharp = (await import("sharp")).default
+    // Build Godot image operations from the user's operation list
+    const { GodotImage } = await import("../util/godot-image")
+    type ImageOp = import("../util/godot-image").ImageOperation
 
-    let pipeline = sharp(absPath)
+    const godotOps: ImageOp[] = []
     const appliedOps: string[] = []
 
     for (const op of params.operations) {
       switch (op.type) {
         case "resize": {
-          const opts: Record<string, unknown> = {
-            fit: op.fit ?? "contain",
-          }
-          if (op.background) {
-            const c = parseHexColor(op.background)
-            opts.background = { r: c.r, g: c.g, b: c.b, alpha: 1 }
-          } else {
-            opts.background = { r: 0, g: 0, b: 0, alpha: 0 }
-          }
-          pipeline = pipeline.resize(op.width ?? null, op.height ?? null, opts)
+          const fit = op.fit === "contain" ? "inside" : (op.fit ?? "inside")
+          godotOps.push({ op: "resize", width: op.width ?? 0, height: op.height ?? 0, fit })
           appliedOps.push(`resize(${op.width ?? "auto"}x${op.height ?? "auto"}, ${op.fit ?? "contain"})`)
           break
         }
         case "crop": {
-          pipeline = pipeline.extract({
-            left: op.left,
-            top: op.top,
-            width: op.width,
-            height: op.height,
-          })
+          godotOps.push({ op: "crop", x: op.left, y: op.top, width: op.width, height: op.height })
           appliedOps.push(`crop(${op.left},${op.top} ${op.width}x${op.height})`)
           break
         }
         case "pad": {
-          const extend: Record<string, number> = {
-            top: op.top ?? 0,
-            right: op.right ?? 0,
-            bottom: op.bottom ?? 0,
-            left: op.left ?? 0,
-          }
-          const bg = op.color
-            ? { ...parseHexColor(op.color), alpha: 1 }
-            : { r: 0, g: 0, b: 0, alpha: 0 }
-          pipeline = pipeline.extend({ ...extend, background: bg })
-          appliedOps.push(`pad(${extend.top},${extend.right},${extend.bottom},${extend.left})`)
+          const padColor = op.color ?? "#00000000"
+          godotOps.push({ op: "pad", top: op.top ?? 0, right: op.right ?? 0, bottom: op.bottom ?? 0, left: op.left ?? 0, color: padColor })
+          appliedOps.push(`pad(${op.top ?? 0},${op.right ?? 0},${op.bottom ?? 0},${op.left ?? 0})`)
           break
         }
         case "trim": {
-          pipeline = pipeline.trim({ threshold: op.threshold ?? 10 })
+          godotOps.push({ op: "trim" })
           appliedOps.push(`trim(threshold=${op.threshold ?? 10})`)
           break
         }
         case "format": {
           const quality = op.quality ?? 80
-          if (op.to === "png") {
-            pipeline = pipeline.png()
-          } else if (op.to === "jpeg") {
-            pipeline = pipeline.jpeg({ quality })
-          } else if (op.to === "webp") {
-            pipeline = pipeline.webp({ quality })
-          }
+          godotOps.push({ op: "format", to: op.to, quality: quality / 100 })
           appliedOps.push(`format(${op.to}${op.to !== "png" ? `, q=${quality}` : ""})`)
           break
         }
@@ -172,12 +147,13 @@ Examples:
       }
     }
 
-    // Write output
-    const outputBuffer = await pipeline.toBuffer()
+    // Execute pipeline via Godot (file path input avoids base64 encoding large images)
+    const result = await GodotImage.pipeline({ path: absPath }, godotOps)
+    const outputBuffer = Buffer.from(result.data, "base64")
     await fs.writeFile(outputPath, outputBuffer)
 
-    // Get final dimensions
-    const meta = await sharp(outputBuffer).metadata()
+    // Get final dimensions from pipeline result
+    const meta = result.metadata
 
     // Log to asset metadata
     const existingMeta = await AssetMetadata.read(absPath)
@@ -206,7 +182,7 @@ Examples:
 })
 
 // =============================================================================
-// godot_asset_remove_bg — Background removal via Replicate (bria/remove-background) or local RMBG-2.0
+// godot_asset_remove_bg -- Background removal via Replicate (bria/remove-background) or local RMBG-2.0
 // =============================================================================
 
 export const GodotAssetRemoveBgTool = Tool.define("godot_asset_remove_bg", {
@@ -247,25 +223,43 @@ Output is always PNG (to preserve transparency).`,
         const Replicate = (await import("replicate")).default
         const client = new Replicate({ auth: replicateKey })
         const dataUrl = `data:image/png;base64,${inputBuffer.toString("base64")}`
-        const output = await client.run("bria-ai/rmbg-2.0", { input: { image: dataUrl } })
-        // Output is a ReadableStream or URL string
-        let outputUrl: string
-        if (typeof output === "string") {
-          outputUrl = output
-        } else if (output && typeof output === "object" && "url" in (output as any)) {
-          outputUrl = String((output as any).url())
-        } else {
-          outputUrl = String(output)
-        }
-        const dlResponse = await fetch(outputUrl)
-        if (!dlResponse.ok) {
-          return {
-            title: "Remove BG failed",
-            metadata: { error: `Replicate download ${dlResponse.status}` },
-            output: `Error: Failed to download result from Replicate (${dlResponse.status})`,
+        const output = await client.run("bria/remove-background", { input: { image: dataUrl } })
+        // Output can be a ReadableStream, a FileOutput (with .url()), or a URL string
+        if (output instanceof ReadableStream) {
+          const chunks: Uint8Array[] = []
+          const reader = (output as ReadableStream<Uint8Array>).getReader()
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            chunks.push(value)
           }
+          const totalLen = chunks.reduce((s, c) => s + c.length, 0)
+          const merged = new Uint8Array(totalLen)
+          let offset = 0
+          for (const c of chunks) {
+            merged.set(c, offset)
+            offset += c.length
+          }
+          resultBuffer = Buffer.from(merged)
+        } else {
+          let outputUrl: string
+          if (typeof output === "string") {
+            outputUrl = output
+          } else if (output && typeof output === "object" && "url" in (output as any)) {
+            outputUrl = String((output as any).url())
+          } else {
+            outputUrl = String(output)
+          }
+          const dlResponse = await fetch(outputUrl)
+          if (!dlResponse.ok) {
+            return {
+              title: "Remove BG failed",
+              metadata: { error: `Replicate download ${dlResponse.status}` },
+              output: `Error: Failed to download result from Replicate (${dlResponse.status})`,
+            }
+          }
+          resultBuffer = Buffer.from(await dlResponse.arrayBuffer())
         }
-        resultBuffer = Buffer.from(await dlResponse.arrayBuffer())
         provider = "replicate"
       } catch (e: any) {
         return {
@@ -277,7 +271,7 @@ Output is always PNG (to preserve transparency).`,
     } else {
       // Local RMBG-2.0 sidecar (default, or fallback when no Replicate key)
       try {
-        const response = await fetch("http://127.0.0.1:4096/ai-assets/remove-background", {
+        const response = await fetch(`${Server.url().origin}/ai-assets/remove-background`, {
           method: "POST",
           headers: { "Content-Type": "image/png" },
           body: new Uint8Array(inputBuffer),
@@ -323,9 +317,9 @@ Output is always PNG (to preserve transparency).`,
       await AssetMetadata.update(absPath, { post_processing: postProcessing } as any)
     }
 
-    // Get output dimensions using sharp
-    const sharp = (await import("sharp")).default
-    const meta = await sharp(resultBuffer).metadata()
+    // Get output dimensions via Godot
+    const { GodotImage } = await import("../util/godot-image")
+    const meta = await GodotImage.metadata(resultBuffer)
 
     return {
       title: "Background removed",

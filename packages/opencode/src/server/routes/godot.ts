@@ -101,6 +101,61 @@ export namespace GodotLogResults {
   }
 }
 
+// ── In-memory image process result store ──────────────────────────────────────
+// Image processing results are posted by Godot editor (WorkerThreadPool) and consumed by GodotImage util.
+
+interface ImageProcessResult {
+  data?: string // base64-encoded output
+  metadata?: Record<string, any>
+  error?: string
+  timestamp: number
+}
+
+const imageProcessResults = new Map<string, ImageProcessResult>()
+
+export namespace GodotImageProcessResults {
+  /** Store an image process result from Godot editor. */
+  export function store(id: string, data?: string, metadata?: Record<string, any>, error?: string) {
+    imageProcessResults.set(id, { data, metadata, error, timestamp: Date.now() })
+    // Auto-cleanup after 60 seconds
+    setTimeout(() => imageProcessResults.delete(id), 60_000)
+  }
+
+  /** Poll for an image process result. Returns null if not ready yet. */
+  export function get(id: string): { data?: string; metadata?: Record<string, any>; error?: string } | null {
+    const result = imageProcessResults.get(id)
+    if (!result) return null
+    return { data: result.data, metadata: result.metadata, error: result.error }
+  }
+}
+
+// ── In-memory atlas split result store ─────────────────────────────────────────
+// Atlas split results: Godot posts detected regions with cropped PNG data.
+
+interface AtlasSplitResult {
+  regions?: Array<{ index: number; rect: { x: number; y: number; width: number; height: number }; area: number; data: string }>
+  error?: string
+  timestamp: number
+}
+
+const atlasSplitResults = new Map<string, AtlasSplitResult>()
+
+export namespace GodotAtlasSplitResults {
+  /** Store an atlas split result from Godot editor. */
+  export function store(id: string, regions?: AtlasSplitResult["regions"], error?: string) {
+    atlasSplitResults.set(id, { regions, error, timestamp: Date.now() })
+    // Auto-cleanup after 120 seconds (atlas images can be large)
+    setTimeout(() => atlasSplitResults.delete(id), 120_000)
+  }
+
+  /** Poll for an atlas split result. Returns null if not ready yet. */
+  export function get(id: string): { regions?: AtlasSplitResult["regions"]; error?: string } | null {
+    const result = atlasSplitResults.get(id)
+    if (!result) return null
+    return { regions: result.regions, error: result.error }
+  }
+}
+
 // ── In-memory record result store ─────────────────────────────────────────────
 // GIF recording results: Godot posts base64 PNG frames, OpenCode encodes to GIF.
 
@@ -246,6 +301,37 @@ export function GodotRoutes() {
       return c.json({ ready: true, ...result })
     })
 
+    // Godot editor POSTs image processing result here (from WorkerThreadPool)
+    .post("/image-process-result", async (c) => {
+      const { id, data, metadata, error } = await c.req.json<{
+        id: string
+        data?: string
+        metadata?: Record<string, any>
+        error?: string
+      }>()
+      if (!id) {
+        return c.json({ error: "Missing id" }, 400)
+      }
+      GodotImageProcessResults.store(id, data, metadata, error)
+      log.info("image-process result stored", { id, hasError: !!error })
+      return c.json({ success: true })
+    })
+
+    // Godot editor POSTs atlas split result here (from WorkerThreadPool)
+    .post("/atlas-split-result", async (c) => {
+      const { id, regions, error } = await c.req.json<{
+        id: string
+        regions?: AtlasSplitResult["regions"]
+        error?: string
+      }>()
+      if (!id) {
+        return c.json({ error: "Missing id" }, 400)
+      }
+      GodotAtlasSplitResults.store(id, regions, error)
+      log.info("atlas-split result stored", { id, regionCount: regions?.length, hasError: !!error })
+      return c.json({ success: true })
+    })
+
     // Godot editor POSTs recording frames here after F10 stop
     // Accepts either { id, frames: base64[] } or { id, framePaths: string[], fps }
     .post("/record-result", async (c) => {
@@ -280,25 +366,26 @@ export function GodotRoutes() {
       GodotRecordResults.store(id, frames)
       log.info("record result stored", { id, frameCount: frames.length })
 
-      // Encode GIF and save to temp file using sharp for PNG decoding
+      // Encode GIF and save to temp file using Godot for PNG decoding
       const fps = body.fps || 10
       try {
-        const { GIFEncoder, quantize, applyPalette } = await import("gifenc")
-        const sharp = (await import("sharp")).default
+        const { GIFEncoder, quantize, applyPalette } = await import("../../util/gifenc")
+        const { GodotImage } = await import("../../util/godot-image")
 
         // Decode first frame to get dimensions
         const firstBuf = Buffer.from(frames[0], "base64")
-        const firstMeta = await sharp(firstBuf).metadata()
-        const width = firstMeta.width!
-        const height = firstMeta.height!
+        const firstDecoded = await GodotImage.decodeToRGBA(firstBuf)
+        const width = firstDecoded.width
+        const height = firstDecoded.height
 
         const gif = GIFEncoder()
         const delay = Math.round(1000 / fps)
 
         for (const frame of frames) {
           const buf = Buffer.from(frame, "base64")
-          // Decode PNG to raw RGBA using sharp
-          const rgba = await sharp(buf).ensureAlpha().raw().toBuffer()
+          // Decode PNG to raw RGBA using Godot
+          const decoded = await GodotImage.decodeToRGBA(buf)
+          const rgba = new Uint8Array(decoded.data)
           const palette = quantize(rgba, 256)
           const indexed = applyPalette(rgba, palette)
           gif.writeFrame(indexed, width, height, { palette, delay })

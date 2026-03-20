@@ -51,23 +51,5 @@
     "services": ["background-removal"],
     "local": true,
     "healthCheck": "/ai-assets/rmbg-health"
-  },
-  "local_atlas_split": {
-    "name": "Atlas Splitter",
-    "services": ["atlas-split"],
-    "local": true,
-    "healthCheck": "/ai-assets/atlas-split-health"
-  },
-  "local_sharp": {
-    "name": "Sharp",
-    "services": ["image-postprocess"],
-    "local": true,
-    "healthCheck": "/ai-assets/sharp-health"
-  },
-  "local_gifenc": {
-    "name": "GIFenc",
-    "services": ["gif-recording"],
-    "local": true,
-    "healthCheck": "/ai-assets/gifenc-health"
   }
 }

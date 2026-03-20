@@ -4,6 +4,7 @@ import fs from "fs/promises"
 import { Tool } from "./tool"
 import { Instance } from "../project/instance"
 import { AtlasSplitter } from "../provider/asset/atlas-splitter"
+import { GodotAtlasSplit } from "../util/godot-image"
 import { Identifier } from "../id/id"
 import type { MessageV2 } from "../session/message-v2"
 
@@ -19,7 +20,7 @@ function toResPath(absPath: string): string {
   return `res://${rel}`
 }
 
-const DESCRIPTION = `Detect and split UI elements from an atlas image using OpenCV connected-component analysis.
+const DESCRIPTION = `Detect and split UI elements from an atlas image using connected-component analysis.
 
 Use this AFTER generating a UI element sheet via godot_asset_pipeline. The tool auto-detects each element's bounding box and outputs AtlasTexture .tres files that reference regions in the original atlas image.
 
@@ -90,17 +91,17 @@ export const GodotAtlasSplitTool = Tool.define(
       // Ensure output directory exists
       await fs.mkdir(absOutputDir, { recursive: true })
 
-      // Read atlas image
-      const imageBuffer = await fs.readFile(absAtlasPath)
-
-      // Detect and split elements
-      const regions = await AtlasSplitter.split(imageBuffer, {
-        minArea: params.min_area,
-        dilationKernel: params.dilation_kernel,
-        dilationIterations: params.dilation_iterations,
-        padding: params.padding,
-        bgMode: params.bg_mode,
-      })
+      // Detect and split elements via Godot's connected-component labeling
+      const regions = await GodotAtlasSplit.split(
+        { path: absAtlasPath },
+        {
+          minArea: params.min_area,
+          dilationKernel: params.dilation_kernel,
+          dilationIterations: params.dilation_iterations,
+          padding: params.padding,
+          bgMode: params.bg_mode,
+        },
+      )
 
       if (regions.length === 0) {
         return {
@@ -111,15 +112,17 @@ export const GodotAtlasSplitTool = Tool.define(
       }
 
       // Assign labels
-      for (let i = 0; i < regions.length; i++) {
-        regions[i].label = params.element_labels?.[i] ?? `element_${i}`
-      }
+      const labeledRegions = regions.map((r, i) => ({
+        ...r,
+        label: params.element_labels?.[i] ?? `element_${i}`,
+        buffer: Buffer.from(r.data, "base64"),
+      }))
 
       const outputFiles: string[] = []
       const atlasResPath = params.atlas_path
 
       // Write AtlasTexture .tres files
-      for (const region of regions) {
+      for (const region of labeledRegions) {
         const filename = `${region.label}.tres`
         const outputPath = path.join(absOutputDir, filename)
         const tresContent = AtlasSplitter.generateAtlasTres(atlasResPath, region)
@@ -127,46 +130,8 @@ export const GodotAtlasSplitTool = Tool.define(
         outputFiles.push(toResPath(outputPath))
       }
 
-      // Build annotated debug image attachment (draw bounding boxes on the atlas)
-      const attachments: MessageV2.FilePart[] = []
-      try {
-        const sharp = (await import("sharp")).default
-        const { width: imgW, height: imgH } = await sharp(imageBuffer).metadata()
-        if (imgW && imgH) {
-          // Create SVG overlay with bounding boxes and labels
-          const svgRects = regions
-            .map((r, i) => {
-              const colors = ["#ff4444", "#44ff44", "#4444ff", "#ffff44", "#ff44ff", "#44ffff", "#ff8800", "#00ff88"]
-              const color = colors[i % colors.length]
-              return `<rect x="${r.rect.x}" y="${r.rect.y}" width="${r.rect.width}" height="${r.rect.height}" fill="none" stroke="${color}" stroke-width="2"/>
-<text x="${r.rect.x + 2}" y="${r.rect.y + 14}" font-size="12" fill="${color}" font-family="monospace">${r.label}</text>`
-            })
-            .join("\n")
-
-          const svgOverlay = `<svg width="${imgW}" height="${imgH}">${svgRects}</svg>`
-
-          const annotated = await sharp(imageBuffer)
-            .ensureAlpha()
-            .composite([{ input: Buffer.from(svgOverlay), gravity: "northwest" }])
-            .png()
-            .toBuffer()
-
-          attachments.push({
-            id: Identifier.ascending("part"),
-            sessionID: ctx.sessionID,
-            messageID: ctx.messageID,
-            type: "file",
-            mime: "image/png",
-            filename: "atlas_annotated.png",
-            url: `data:image/png;base64,${annotated.toString("base64")}`,
-          })
-        }
-      } catch {
-        // Non-critical: skip debug image if compositing fails
-      }
-
-      // Build output summary
-      const elementList = regions
+      // Build output summary (no debug image — SVG composite was non-critical and required sharp)
+      const elementList = labeledRegions
         .map((r) => `  ${r.label}: ${r.rect.width}x${r.rect.height} at (${r.rect.x}, ${r.rect.y})`)
         .join("\n")
 
@@ -182,14 +147,13 @@ export const GodotAtlasSplitTool = Tool.define(
         title: `Split ${regions.length} elements`,
         metadata: {
           elementCount: regions.length,
-          elements: regions.map((r) => ({
+          elements: labeledRegions.map((r) => ({
             label: r.label,
             rect: r.rect,
           })),
           outputFiles,
         },
         output,
-        attachments,
       }
     },
   },
