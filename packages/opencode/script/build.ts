@@ -116,6 +116,26 @@ const targets = singleFlag
 
 await $`rm -rf dist`
 
+// Patch y18n to avoid readFileSync crash in Bun compiled binaries.
+// Bun's virtual FS throws EUNKNOWN (not ENOENT) for missing locale files,
+// which bypasses y18n's fallback logic and crashes the process.
+// Fix: replace the ENOENT-only check with a catch-all empty lookup.
+const y18nLib = path.join(dir, "../../node_modules/.bun/y18n@5.0.8/node_modules/y18n/build/lib/index.js")
+if (fs.existsSync(y18nLib)) {
+  let src = fs.readFileSync(y18nLib, "utf-8")
+  const original = `if (err.code === 'ENOENT')\n                localeLookup = {};\n            else\n                throw err;`
+  const patched = `localeLookup = {};`
+  if (src.includes(original)) {
+    src = src.replace(original, patched)
+    fs.writeFileSync(y18nLib, src)
+    console.log("Patched y18n for Bun compiled binary compatibility")
+  } else if (src.includes(patched)) {
+    console.log("y18n already patched")
+  } else {
+    console.warn("WARNING: Could not find y18n patch target — locale errors may occur in compiled binary")
+  }
+}
+
 const binaries: Record<string, string> = {}
 if (!skipInstall) {
   await $`bun install --os="*" --cpu="*" @opentui/core@${pkg.dependencies["@opentui/core"]}`

@@ -178,6 +178,12 @@ export const ProviderRoutes = lazy(() =>
 
         await ProviderAuth.api({ providerID, key: apiKey })
         Provider.reset()
+
+        // Also register in asset provider registry if provider offers non-chat services (e.g. image-generation)
+        if (cap?.services.some((s: string) => s !== "chat")) {
+          await AssetProviderRegistry.configureProvider(providerID, apiKey).catch(() => {})
+        }
+
         return c.json(true)
       },
     )

@@ -6,6 +6,7 @@ import { MeshyProvider } from "./meshy"
 import { DoubaoProvider } from "./doubao"
 import { SunoProvider } from "./suno"
 import { ReplicateProvider } from "./replicate"
+import { GeminiProvider } from "./gemini"
 
 /**
  * Central registry for asset generation providers.
@@ -30,6 +31,7 @@ export namespace AssetProviderRegistry {
     meshy: (config) => new MeshyProvider(config),
     doubao: (config) => new DoubaoProvider(config),
     suno: (config) => new SunoProvider(config),
+    google: (config) => new GeminiProvider(config),
   }
 
   /** Default provider for each asset type (when no config override) */

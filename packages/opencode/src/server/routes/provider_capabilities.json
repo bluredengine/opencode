@@ -13,7 +13,7 @@
   },
   "google": {
     "name": "Google",
-    "services": ["chat"],
+    "services": ["chat", "image-generation"],
     "api": { "url": "https://generativelanguage.googleapis.com/v1beta", "authType": "query" }
   },
   "openrouter": {
