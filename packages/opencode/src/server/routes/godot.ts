@@ -341,8 +341,18 @@ export function GodotRoutes() {
         return c.json({ error: "Missing id" }, 400)
       }
 
+      // Parse raw RGBA frame file: 8-byte header (uint32 LE width + uint32 LE height) + RGBA pixels.
+      function parseRawRGBA(buf: Buffer): { width: number; height: number; rgba: Uint8Array } {
+        const width = buf.readUInt32LE(0)
+        const height = buf.readUInt32LE(4)
+        const rgba = new Uint8Array(buf.buffer, buf.byteOffset + 8, width * height * 4)
+        return { width, height, rgba }
+      }
+
+      let framePaths: string[] = []
       let frames: string[]
       if (body.framePaths?.length) {
+        framePaths = body.framePaths
         // Read frames from disk (file-based approach for large recordings)
         frames = []
         for (const fp of body.framePaths) {
@@ -366,29 +376,45 @@ export function GodotRoutes() {
       GodotRecordResults.store(id, frames)
       log.info("record result stored", { id, frameCount: frames.length })
 
-      // Encode GIF and save to temp file using Godot for PNG decoding
+      // Encode GIF from frames
       const fps = body.fps || 10
+      const isRawRGBA = framePaths.length > 0 && framePaths[0].endsWith(".rgba")
       try {
         const { GIFEncoder, quantize, applyPalette } = await import("../../util/gifenc")
-        const { GodotImage } = await import("../../util/godot-image")
-
-        // Decode first frame to get dimensions
-        const firstBuf = Buffer.from(frames[0], "base64")
-        const firstDecoded = await GodotImage.decodeToRGBA(firstBuf)
-        const width = firstDecoded.width
-        const height = firstDecoded.height
 
         const gif = GIFEncoder()
         const delay = Math.round(1000 / fps)
+        let width = 0
+        let height = 0
 
-        for (const frame of frames) {
-          const buf = Buffer.from(frame, "base64")
-          // Decode PNG to raw RGBA using Godot
-          const decoded = await GodotImage.decodeToRGBA(buf)
-          const rgba = new Uint8Array(decoded.data)
-          const palette = quantize(rgba, 256)
-          const indexed = applyPalette(rgba, palette)
-          gif.writeFrame(indexed, width, height, { palette, delay })
+        if (isRawRGBA) {
+          // Fast path: frames are raw RGBA -- no PNG decoding needed.
+          for (const frame of frames) {
+            const buf = Buffer.from(frame, "base64")
+            const parsed = parseRawRGBA(buf)
+            if (width === 0) {
+              width = parsed.width
+              height = parsed.height
+            }
+            const palette = quantize(parsed.rgba, 256)
+            const indexed = applyPalette(parsed.rgba, palette)
+            gif.writeFrame(indexed, width, height, { palette, delay })
+          }
+        } else {
+          // Legacy path: PNG frames -- decode via Godot.
+          const { GodotImage } = await import("../../util/godot-image")
+          for (const frame of frames) {
+            const buf = Buffer.from(frame, "base64")
+            const decoded = await GodotImage.decodeToRGBA(buf)
+            if (width === 0) {
+              width = decoded.width
+              height = decoded.height
+            }
+            const rgba = new Uint8Array(decoded.data)
+            const palette = quantize(rgba, 256)
+            const indexed = applyPalette(rgba, palette)
+            gif.writeFrame(indexed, width, height, { palette, delay })
+          }
         }
 
         gif.finish()
@@ -400,9 +426,28 @@ export function GodotRoutes() {
         await fs.writeFile(gifPath, Buffer.from(gifBytes))
         log.info("GIF encoded and saved", { id, gifPath, size: gifBytes.length, frames: frames.length })
 
+        // Clean up temp frame files and their session folder
+        const sessionDirs = new Set<string>()
+        for (const fp of framePaths) {
+          sessionDirs.add(path.dirname(fp))
+          fs.unlink(fp).catch(() => {})
+        }
+        for (const dir of sessionDirs) {
+          fs.rmdir(dir).catch(() => {}) // only succeeds if empty
+        }
+
         return c.json({ success: true, gifPath, frameCount: frames.length })
       } catch (e: any) {
         log.error("GIF encoding failed", { id, error: e.message })
+        // Still clean up temp files on error
+        const sessionDirs = new Set<string>()
+        for (const fp of framePaths) {
+          sessionDirs.add(path.dirname(fp))
+          fs.unlink(fp).catch(() => {})
+        }
+        for (const dir of sessionDirs) {
+          fs.rmdir(dir).catch(() => {})
+        }
         return c.json({ success: true, frameCount: frames.length, gifError: e.message })
       }
     })
