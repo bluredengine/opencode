@@ -135,6 +135,7 @@ export class GeminiProvider implements AssetProvider.Provider {
           responseModalities: ["IMAGE"],
           imageConfig: {
             aspectRatio,
+            outputMimeType: "image/png",
           },
         },
       }
@@ -170,6 +171,10 @@ export class GeminiProvider implements AssetProvider.Provider {
         for (const part of candidate.content?.parts ?? []) {
           const inlineData = part.inlineData ?? part.inline_data
           if (inlineData?.data) {
+            const mime = inlineData.mimeType ?? (inlineData as any).mime_type ?? ""
+            if (mime && mime !== "image/png") {
+              this.log.error("Gemini returned non-PNG image despite outputMimeType=image/png", { mimeType: mime })
+            }
             images.push(Buffer.from(inlineData.data, "base64"))
           }
         }
@@ -220,7 +225,7 @@ export class GeminiProvider implements AssetProvider.Provider {
       type: "texture" as const,
       role: (i === 0 ? "primary" : "texture") as "primary" | "texture",
       data,
-      filename: `image_${i}.png`,
+      filename: `image_${i}${GeminiProvider.detectImageExtension(data)}`,
       metadata: { index: i },
     }))
 
@@ -252,5 +257,14 @@ export class GeminiProvider implements AssetProvider.Provider {
       }
     }
     return best
+  }
+
+  private static detectImageExtension(data: Buffer): string {
+    if (data.length < 4) return ".png"
+    if (data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47) return ".png"
+    if (data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return ".jpg"
+    if (data[0] === 0x52 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x46 && data.length >= 12 &&
+        data[8] === 0x57 && data[9] === 0x45 && data[10] === 0x42 && data[11] === 0x50) return ".webp"
+    return ".png"
   }
 }

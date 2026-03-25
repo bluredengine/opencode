@@ -402,8 +402,11 @@ export class ReplicateProvider implements AssetProvider.Provider {
     const arrayBuffer = await response.arrayBuffer()
     const data = Buffer.from(arrayBuffer)
 
-    // Detect actual format from magic bytes — Replicate often returns WebP despite URL ending in .png
+    // Detect actual format from magic bytes
     const extension = this.detectImageExtension(data)
+    if (extension !== ".png") {
+      this.log.error("Replicate returned non-PNG data despite output_format=png", { url: url.slice(0, 120), extension, size: data.length })
+    }
     return { data, extension }
   }
 

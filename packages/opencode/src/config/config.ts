@@ -1053,7 +1053,7 @@ export namespace Config {
           }),
         )
         .optional()
-        .describe("Asset generation provider configurations (replicate, meshy, doubao, suno)"),
+        .describe("Asset generation provider configurations (replicate, meshy, volcengine, suno)"),
       compaction: z
         .object({
           auto: z.boolean().optional().describe("Enable automatic compaction when context is full (default: true)"),
@@ -1064,6 +1064,7 @@ export namespace Config {
         .object({
           image_model: z.string().optional().describe("Image generation model ID (e.g. 'nano-banana-2', 'nano-banana-pro')"),
           removebg_method: z.enum(["replicate", "local"]).optional().describe("Background removal method: 'replicate' for Replicate bria/rmbg-2.0, 'local' for RMBG-2.0 sidecar"),
+          vision_model: z.string().optional().describe("Vision model for UI measurement (e.g. 'anthropic/claude-sonnet-4-6', 'google/gemini-3.1-pro-preview', 'volcengine/doubao-seed-1-6-vision-250815')"),
         })
         .optional()
         .describe("Service settings for asset pipeline (removebg, etc.)"),

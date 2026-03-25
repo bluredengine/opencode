@@ -4,8 +4,14 @@ import fs from "fs/promises"
 import { Tool } from "./tool"
 import { Instance } from "../project/instance"
 import { Provider } from "../provider/provider"
-import { generateText } from "ai"
-import { getModelDefaults } from "../config/model-defaults"
+import { Config } from "../config/config"
+import { Auth } from "../auth"
+import { Session } from "../session"
+import { SessionPrompt } from "../session/prompt"
+import { Identifier } from "../id/id"
+import { Log } from "../util/log"
+
+const log = Log.create({ service: "godot-ui-measure" })
 
 // =============================================================================
 // Helpers
@@ -221,7 +227,7 @@ This tool sends the reference image to an LLM with a structured measurement prom
 
 Call this INSTEAD of manually measuring sections. Use the returned data to write the .tscn directly.
 
-The LLM model used for measurement is configured in makabaka-models.json via the "ui_measure_llm" field. If not set, uses the session's default model.`
+The vision model is configured via the setup wizard (stored in services.vision_model). Supported providers: anthropic, google, volcengine. If not configured, falls back to the session's default model.`
 
 export const GodotUIMeasureTool = Tool.define("godot_ui_measure", {
   description: DESCRIPTION,
@@ -285,136 +291,142 @@ export const GodotUIMeasureTool = Tool.define("godot_ui_measure", {
       panelDescription: params.panel_description || "UI panel",
     })
 
-    // 4. Call LLM with vision
-    const defaults = getModelDefaults()
+    // 4. Call vision model via session pipeline
+    const config = await Config.get()
+    const visionModelStr = config.services?.vision_model
     let resultText: string
     let modelUsed: string
 
-    if (defaults.ui_measure_api_base && defaults.ui_measure_api_key && defaults.ui_measure_model) {
-      // Direct API call (e.g. Volcengine Ark / Doubao)
-      modelUsed = defaults.ui_measure_model
-      try {
-        console.log(`[godot_ui_measure] Calling custom API (base=${defaults.ui_measure_api_base}, model=${modelUsed})...`)
+    // Parse "providerID/modelID" format
+    let resolvedProviderID: string
+    let resolvedModelID: string
+    let variant: string | undefined
 
-        // Encode image to base64 data URL
-        const base64 = imageBuffer.toString("base64")
-        const mimeType = absImagePath.endsWith(".png") ? "image/png" : "image/jpeg"
-        const dataUrl = `data:${mimeType};base64,${base64}`
-
-        // Ark/Doubao uses OpenAI Responses API format with input_image/input_text content types
-        const apiUrl = `${defaults.ui_measure_api_base}/responses`
-        const response = await fetch(apiUrl, {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${defaults.ui_measure_api_key}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: defaults.ui_measure_model,
-            input: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "input_image",
-                    image_url: dataUrl,
-                  },
-                  {
-                    type: "input_text",
-                    text: measurementPrompt,
-                  },
-                ],
-              },
-            ],
-            temperature: 0.2,
-            max_output_tokens: 20000,
-            thinking: {
-              type: "enabled",
-            },
-          }),
-        })
-
-        if (!response.ok) {
-          const errBody = await response.text()
-          throw new Error(`API returned ${response.status}: ${errBody}`)
-        }
-
-        const json = await response.json() as any
-
-        // Extract text from Responses API output
-        // Format: { output: [ { type: "message", content: [ { type: "output_text", text: "..." } ] } ] }
-        resultText = ""
-        if (json.output) {
-          for (const item of json.output) {
-            if (item.type === "message" && item.content) {
-              for (const part of item.content) {
-                if (part.type === "output_text" && part.text) {
-                  resultText += part.text
-                }
-              }
-            }
-          }
-        }
-        // Fallback: check for choices format (standard OpenAI chat completions)
-        if (!resultText && json.choices?.[0]?.message?.content) {
-          resultText = json.choices[0].message.content
-        }
-
-        if (!resultText) {
-          throw new Error(`Unexpected API response structure: ${JSON.stringify(json).slice(0, 500)}`)
-        }
-
-        console.log(`[godot_ui_measure] Custom API returned ${resultText.length} chars`)
-      } catch (err: any) {
-        console.error(`[godot_ui_measure] Custom API error:`, err)
-        return {
-          title: "LLM measurement failed",
-          metadata: { error: err.message },
-          output: `Failed to call custom measurement API: ${err.message}\n\nStack: ${err.stack || "none"}`,
-        }
+    if (visionModelStr) {
+      const providerID = visionModelStr.split("/", 1)[0]
+      const modelID = visionModelStr.slice(providerID.length + 1)
+      resolvedProviderID = providerID
+      resolvedModelID = modelID
+      // Set highest thinking variant per provider
+      if (providerID === "anthropic") {
+        variant = "max" // thinking.budgetTokens: 31999
+      } else if (providerID === "google") {
+        variant = "high" // thinkingConfig.thinkingLevel: "high"
       }
     } else {
-      // Use provider system (default LLM or configured ui_measure_llm)
+      // No vision model configured — fall back to session default
       const defaultModel = await Provider.defaultModel()
-      let model
-      if (defaults.ui_measure_llm) {
-        model = await Provider.getModel(defaultModel.providerID, defaults.ui_measure_llm)
-      } else {
-        model = await Provider.getModel(defaultModel.providerID, defaultModel.modelID)
-      }
-      const language = await Provider.getLanguage(model)
-      modelUsed = defaults.ui_measure_llm || defaultModel.modelID
+      resolvedProviderID = defaultModel.providerID
+      resolvedModelID = defaultModel.modelID
+    }
 
-      try {
-        console.log(`[godot_ui_measure] Calling LLM (provider=${defaultModel.providerID}, model=${model.id})...`)
-        const result = await generateText({
-          model: language,
-          messages: [
-            {
-              role: "user",
-              content: [
-                { type: "text", text: measurementPrompt },
-                { type: "image", image: imageBuffer },
-              ],
-            },
-          ],
-          temperature: 0.2,
-          maxOutputTokens: 20000,
-          providerOptions: {
-            anthropic: {
-              thinking: { type: "enabled", budgetTokens: 16000 },
+    modelUsed = resolvedModelID
+
+    // Ensure volcengine LLM provider is registered if needed
+    if (resolvedProviderID === "volcengine") {
+      const existing = await Provider.getProvider("volcengine").catch(() => null)
+      if (!existing) {
+        let apiKey: string | undefined
+        try {
+          const authInfo = await Auth.get("volcengine")
+          if (authInfo?.type === "api") apiKey = authInfo.key
+        } catch {}
+        if (!apiKey) apiKey = process.env.VOLCENGINE_API_KEY
+        if (!apiKey) {
+          return {
+            title: "Volcengine API key not configured",
+            metadata: { error: "missing api key" },
+            output: "Volcengine vision model selected but no API key found. Configure it in the setup wizard or set the VOLCENGINE_API_KEY environment variable.",
+          }
+        }
+        await Config.update({
+          provider: {
+            volcengine: {
+              name: "Volcengine (ByteDance)",
+              api: "https://ark.cn-beijing.volces.com/api/v3",
+              models: {
+                [resolvedModelID]: {
+                  modalities: { input: ["text", "image"], output: ["text"] },
+                  reasoning: true,
+                  attachment: true,
+                  tool_call: false,
+                  temperature: false,
+                  limit: { context: 128000, output: 20000 },
+                  cost: { input: 0, output: 0 },
+                  release_date: "2025-08-15",
+                },
+              },
             },
           },
-        })
-        resultText = result.text
-        console.log(`[godot_ui_measure] LLM returned ${resultText?.length ?? 0} chars, finishReason=${result.finishReason}`)
-      } catch (err: any) {
-        console.error(`[godot_ui_measure] LLM error:`, err)
-        return {
-          title: "LLM measurement failed",
-          metadata: { error: err.message },
-          output: `Failed to call LLM for measurement: ${err.message}\n\nStack: ${err.stack || "none"}`,
+        } as any)
+        Config.state.reset()
+        Provider.reset()
+        log.info("registered volcengine LLM provider at runtime", { model: resolvedModelID })
+      }
+    }
+
+    try {
+      log.info("creating vision measurement session", { provider: resolvedProviderID, model: resolvedModelID, variant })
+
+      const session = await Session.create({
+        parentID: ctx.sessionID,
+        title: "UI Measurement",
+      })
+
+      const base64 = imageBuffer.toString("base64")
+      const mimeType = absImagePath.endsWith(".png") ? "image/png" : "image/jpeg"
+      const dataUrl = `data:${mimeType};base64,${base64}`
+
+      const messageID = Identifier.ascending("message")
+      const result = await SessionPrompt.prompt({
+        messageID,
+        sessionID: session.id,
+        model: {
+          providerID: resolvedProviderID,
+          modelID: resolvedModelID,
+        },
+        variant,
+        parts: [
+          { type: "text", text: measurementPrompt },
+          { type: "file", url: dataUrl, mime: mimeType, filename: path.basename(absImagePath) },
+        ],
+      })
+
+      const partTypes = result.parts.map((p: any) => p.type)
+      log.info("vision measurement parts", { types: partTypes, count: result.parts.length })
+
+      resultText = result.parts
+        .filter((p: any) => p.type === "text")
+        .map((p: any) => p.text)
+        .join("")
+
+      // If no text parts, check for reasoning parts (some models return thinking only)
+      if (!resultText) {
+        const reasoning = result.parts
+          .filter((p: any) => p.type === "reasoning")
+          .map((p: any) => p.text || p.reasoning || "")
+          .join("")
+        if (reasoning) {
+          log.warn("vision measurement: no text parts, found reasoning parts only", { chars: reasoning.length })
+          resultText = reasoning
         }
+      }
+
+      log.info("vision measurement returned", { chars: resultText?.length ?? 0 })
+
+      if (!resultText) {
+        return {
+          title: "Vision model returned empty response",
+          metadata: { error: "empty response", partTypes },
+          output: `The vision model (${modelUsed}) returned an empty response. Part types in response: [${partTypes.join(", ")}]. This may indicate the model does not support image input or the response format is not recognized. Try a different vision model.`,
+        }
+      }
+    } catch (err: any) {
+      log.error("vision measurement error", { error: err.message })
+      return {
+        title: "Vision model call failed",
+        metadata: { error: err.message },
+        output: `Failed to call vision model for measurement: ${err.message}\n\nStack: ${err.stack || "none"}`,
       }
     }
 
@@ -426,6 +438,8 @@ export const GodotUIMeasureTool = Tool.define("godot_ui_measure", {
       `- **Viewport**: ${params.viewport_width}×${params.viewport_height} px`,
       `- **Scale factor**: ${scaleFactor.toFixed(4)}×`,
       `- **Model used**: ${modelUsed}`,
+      ``,
+      `**IMPORTANT: These measurements are pixel-precise. Use them directly to write the .tscn — do NOT re-examine or re-measure the reference image yourself.**`,
       ``,
       `---`,
       ``,

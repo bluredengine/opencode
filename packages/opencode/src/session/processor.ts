@@ -345,8 +345,9 @@ export namespace SessionProcessor {
             // Context overflow → compact instead of stopping
             if (
               error.name === "APIError" &&
-              error.data.message &&
-              /prompt is too long|context.length.exceeded|request.too.large|maximum.context.length/i.test(error.data.message)
+              (error.data.statusCode === 413 ||
+                (error.data.message &&
+                  /prompt is too long|context.length.exceeded|request.too.large|request entity too large|maximum.context.length|payload too large|entity too large/i.test(error.data.message)))
             ) {
               log.info("context overflow detected, triggering compaction")
               needsCompaction = true

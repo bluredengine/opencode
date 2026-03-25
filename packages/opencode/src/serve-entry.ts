@@ -1,4 +1,4 @@
-// Minimal entry point for packaged Makabaka Engine.
+// Minimal entry point for packaged Blured Engine.
 // Bypasses yargs/y18n to avoid Bun single-exe virtual filesystem crash.
 // Usage: opencode-serve.exe [--port PORT] [--hostname HOST]
 

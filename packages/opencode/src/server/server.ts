@@ -40,7 +40,7 @@ import { QuestionRoutes } from "./routes/question"
 import { PermissionRoutes } from "./routes/permission"
 import { GlobalRoutes } from "./routes/global"
 import { AIAssetRoutes } from "./routes/ai-assets"
-import { GodotRoutes } from "./routes/godot"
+import { GodotRoutes, startGodotLivenessCheck } from "./routes/godot"
 import { AssetProviderRegistry } from "../provider/asset"
 import { MDNS } from "./mdns"
 import path from "path"
@@ -79,12 +79,12 @@ export namespace Server {
       return
     }
 
-    const rmbgPort = process.env.MAKABAKA_RMBG_PORT ?? "7860"
+    const rmbgPort = process.env.BLURED_RMBG_PORT ?? "7860"
     log.info("Starting RMBG-2.0 sidecar service...", { port: rmbgPort })
 
     _rmbgProcess = Bun.spawn(["python", "main.py"], {
       cwd: rmbgDir,
-      env: { ...process.env, MAKABAKA_RMBG_PORT: rmbgPort },
+      env: { ...process.env, BLURED_RMBG_PORT: rmbgPort },
       stdout: "inherit",
       stderr: "inherit",
     })
@@ -661,6 +661,9 @@ export namespace Server {
     spawnRmbgSidecar().catch((e) =>
       log.warn("failed to start RMBG sidecar", { error: e })
     )
+
+    // Auto-shutdown when Godot editor disconnects
+    startGodotLivenessCheck()
 
     const shouldPublishMDNS =
       opts.mdns &&

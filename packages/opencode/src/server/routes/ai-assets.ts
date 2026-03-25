@@ -8,6 +8,7 @@ import { AssetProviderRegistry } from "../../provider/asset"
 import { AssetProvider } from "../../provider/asset/asset-provider"
 import { AssetMetadata } from "../../provider/asset/metadata"
 import { Provider } from "../../provider/provider"
+import { Auth } from "../../auth"
 import { Instance } from "../../project/instance"
 import path from "path"
 import fs from "fs/promises"
@@ -30,6 +31,62 @@ export async function getRemoveBgMethod(): Promise<"replicate" | "local"> {
   // Migrate old "api" value to "replicate"
   if (method === "api" as any) return "replicate"
   return method ?? "local"
+}
+
+/**
+ * When a volcengine vision model is selected, ensure the volcengine LLM provider
+ * is registered in the config so SessionPrompt.prompt() can resolve it.
+ */
+async function ensureVolcengineLLMProvider(modelID: string) {
+  const config = await Config.get()
+
+  // Resolve API key: auth.json > asset_provider config > env var
+  let apiKey: string | undefined
+  try {
+    const authInfo = await Auth.get("volcengine")
+    if (authInfo?.type === "api") apiKey = authInfo.key
+  } catch {}
+  if (!apiKey) {
+    const assetConfig = (config as any).asset_provider as Record<string, any> | undefined
+    const volcConfig = assetConfig?.volcengine
+    apiKey = volcConfig?.api_key
+    if (!apiKey && volcConfig?.api_key_env) {
+      apiKey = process.env[volcConfig.api_key_env]
+    }
+  }
+  if (!apiKey) apiKey = process.env.VOLCENGINE_API_KEY
+  if (!apiKey) {
+    log.warn("volcengine vision model selected but no API key found")
+    return
+  }
+
+  // Register volcengine as an LLM provider with the vision model
+  // Note: API key is NOT stored in config — it's resolved from auth.json at runtime
+  await Config.update({
+    provider: {
+      volcengine: {
+        name: "Volcengine (ByteDance)",
+        api: "https://ark.cn-beijing.volces.com/api/v3",
+        models: {
+          [modelID]: {
+            modalities: {
+              input: ["text", "image"],
+              output: ["text"],
+            },
+            reasoning: true,
+            attachment: true,
+            tool_call: false,
+            temperature: false,
+            limit: { context: 128000, output: 20000 },
+            cost: { input: 0, output: 0 },
+            release_date: "2025-08-15",
+          },
+        },
+      },
+    },
+  } as any)
+  Config.state.reset()
+  Provider.reset()
 }
 
 export const AIAssetRoutes = lazy(() =>
@@ -638,16 +695,44 @@ export const AIAssetRoutes = lazy(() =>
 
     // Wizard saves multiple settings atomically and forces config reload
     .post("/wizard-settings", async (c) => {
-      const body = await c.req.json<{ image_model?: string; removebg_method?: string }>()
+      const body = await c.req.json<{ image_model?: string; removebg_method?: string; vision_model?: string }>()
       const updates: Record<string, unknown> = {}
       if (body.image_model) updates.image_model = body.image_model
       if (body.removebg_method) updates.removebg_method = body.removebg_method
+      if (body.vision_model) updates.vision_model = body.vision_model
       if (Object.keys(updates).length > 0) {
         await Config.update({ services: updates } as any)
-        // Force state reset so next GET reads fresh config
         Config.state.reset()
       }
+      // Register volcengine LLM provider if a volcengine vision model was selected
+      if (body.vision_model?.startsWith("volcengine/")) {
+        const modelID = body.vision_model.slice("volcengine/".length)
+        await ensureVolcengineLLMProvider(modelID)
+      }
       return c.json({ success: true, ...updates })
+    })
+
+    // GET vision model config
+    .get("/vision-model", async (c) => {
+      const config = await Config.get()
+      const model = config.services?.vision_model ?? ""
+      return c.json({ model })
+    })
+
+    // POST set vision model
+    .post("/vision-model", async (c) => {
+      const { model } = await c.req.json<{ model: string }>()
+      if (!model) {
+        return c.json({ error: "model is required" }, 400)
+      }
+      await Config.update({ services: { vision_model: model } } as any)
+      Config.state.reset()
+      // Register volcengine LLM provider if needed
+      if (model.startsWith("volcengine/")) {
+        const modelID = model.slice("volcengine/".length)
+        await ensureVolcengineLLMProvider(modelID)
+      }
+      return c.json({ success: true, model })
     })
 
     // Image processing health: now handled by Godot's native Image class (always available when connected)
@@ -667,7 +752,7 @@ export const AIAssetRoutes = lazy(() =>
 
     // Check if local RMBG-2.0 service is running
     .get("/rmbg-health", async (c) => {
-      const rmbgPort = process.env.MAKABAKA_RMBG_PORT ?? "7860"
+      const rmbgPort = process.env.BLURED_RMBG_PORT ?? "7860"
       try {
         const resp = await fetch(`http://127.0.0.1:${rmbgPort}/health`, {
           signal: AbortSignal.timeout(5_000),
@@ -687,7 +772,7 @@ export const AIAssetRoutes = lazy(() =>
 
     // Proxy to local RMBG-2.0 sidecar for background removal
     .post("/remove-background", async (c) => {
-      const rmbgPort = process.env.MAKABAKA_RMBG_PORT ?? "7860"
+      const rmbgPort = process.env.BLURED_RMBG_PORT ?? "7860"
       const body = await c.req.arrayBuffer()
       try {
         const resp = await fetch(`http://127.0.0.1:${rmbgPort}/remove-background`, {
@@ -717,7 +802,7 @@ export const AIAssetRoutes = lazy(() =>
     // Aggregate health status for all local providers
     .get("/local-status", async (c) => {
       const pkgDir = path.resolve(import.meta.dir, "../../..")
-      const rmbgPort = process.env.MAKABAKA_RMBG_PORT ?? "7860"
+      const rmbgPort = process.env.BLURED_RMBG_PORT ?? "7860"
       type LocalStatus = { name: string; service: string; status: "ok" | "not_installed" | "installed_not_running" }
       const results: Record<string, LocalStatus> = {}
 
@@ -835,7 +920,7 @@ async function spawnRmbgSidecarLocal(): Promise<{ success: boolean; detail: stri
   const pkgDir = path.resolve(import.meta.dir, "../../..")
   const rmbgDir = path.resolve(pkgDir, "services/rmbg")
   const mainPy = path.join(rmbgDir, "main.py")
-  const rmbgPort = process.env.MAKABAKA_RMBG_PORT ?? "7860"
+  const rmbgPort = process.env.BLURED_RMBG_PORT ?? "7860"
 
   try {
     await fs.access(mainPy)
@@ -853,7 +938,7 @@ async function spawnRmbgSidecarLocal(): Promise<{ success: boolean; detail: stri
 
   Bun.spawn(["python", "main.py"], {
     cwd: rmbgDir,
-    env: { ...process.env, MAKABAKA_RMBG_PORT: rmbgPort },
+    env: { ...process.env, BLURED_RMBG_PORT: rmbgPort },
     stdout: "inherit",
     stderr: "inherit",
   })

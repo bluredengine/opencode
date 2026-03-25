@@ -22,20 +22,12 @@ export interface ModelDefaults {
   cornerstone: string
   /** Default model for Meshy 3D generation and transforms */
   model_3d: string
-  /** Default model for Doubao image generation and transforms */
-  image_doubao: string
+  /** Default model for Volcengine image generation and transforms */
+  image_volcengine: string
   /** Default model for sound effect generation */
   audio_sfx: string
   /** Default model for music generation */
   audio_music: string
-  /** LLM model ID for UI measurement vision analysis (empty = use session's default LLM) */
-  ui_measure_llm: string
-  /** Custom API base URL for UI measurement (e.g. Volcengine Ark). When set, calls this API directly instead of the provider system. */
-  ui_measure_api_base: string
-  /** API key for the custom UI measurement endpoint */
-  ui_measure_api_key: string
-  /** Model name for the custom UI measurement endpoint */
-  ui_measure_model: string
 }
 
 const BUILTIN_DEFAULTS: ModelDefaults = {
@@ -47,20 +39,16 @@ const BUILTIN_DEFAULTS: ModelDefaults = {
   style_set: "nano-banana-2",
   cornerstone: "nano-banana-2",
   model_3d: "meshy-6",
-  image_doubao: "seedream-4",
+  image_volcengine: "seedream-4",
   audio_sfx: "suno-sfx",
   audio_music: "suno-v5",
-  ui_measure_llm: "",
-  ui_measure_api_base: "",
-  ui_measure_api_key: "",
-  ui_measure_model: "",
 }
 
 function findEngineRoot(): string | null {
   let dir = path.resolve(import.meta.dir, "../../..")
   for (let i = 0; i < 10; i++) {
     try {
-      readFileSync(path.join(dir, "makabaka.json"))
+      readFileSync(path.join(dir, "blured.json"))
       return dir
     } catch {
       const parent = path.dirname(dir)
@@ -78,7 +66,7 @@ function loadDefaults(): ModelDefaults {
     return { ...BUILTIN_DEFAULTS }
   }
 
-  const configPath = path.join(engineRoot, "makabaka-models.json")
+  const configPath = path.join(engineRoot, "blured-models.json")
   try {
     const raw = readFileSync(configPath, "utf8")
     const parsed = JSON.parse(raw) as Partial<ModelDefaults>
@@ -86,7 +74,7 @@ function loadDefaults(): ModelDefaults {
     log.info("loaded model defaults from config", { path: configPath })
     return merged
   } catch {
-    log.info("no makabaka-models.json found, using built-in defaults")
+    log.info("no blured-models.json found, using built-in defaults")
     return { ...BUILTIN_DEFAULTS }
   }
 }

@@ -91,6 +91,46 @@ async function encodeFramesToGif(base64Frames: string[], fps: number): Promise<s
   return Buffer.from(gifBytes).toString("base64")
 }
 
+/**
+ * Downscale raw RGBA frames by the given factor.
+ * Only works with raw RGBA format (8-byte header + RGBA pixels).
+ * Returns null if frames aren't in raw RGBA format.
+ */
+function downscaleFrames(frames: string[], scale: number): string[] | null {
+  const result: string[] = []
+  for (const frame of frames) {
+    const buf = Buffer.from(frame, "base64")
+    const parsed = tryParseRawRGBA(buf)
+    if (!parsed) return null // can't downscale non-raw frames
+
+    const { width, height, rgba } = parsed
+    const newW = Math.max(1, Math.round(width * scale))
+    const newH = Math.max(1, Math.round(height * scale))
+    const out = new Uint8Array(newW * newH * 4)
+
+    for (let y = 0; y < newH; y++) {
+      const srcY = Math.min(Math.round(y / scale), height - 1)
+      for (let x = 0; x < newW; x++) {
+        const srcX = Math.min(Math.round(x / scale), width - 1)
+        const srcIdx = (srcY * width + srcX) * 4
+        const dstIdx = (y * newW + x) * 4
+        out[dstIdx] = rgba[srcIdx]
+        out[dstIdx + 1] = rgba[srcIdx + 1]
+        out[dstIdx + 2] = rgba[srcIdx + 2]
+        out[dstIdx + 3] = rgba[srcIdx + 3]
+      }
+    }
+
+    // Re-encode with 8-byte header
+    const outBuf = Buffer.alloc(8 + out.length)
+    outBuf.writeUInt32LE(newW, 0)
+    outBuf.writeUInt32LE(newH, 4)
+    outBuf.set(out, 8)
+    result.push(outBuf.toString("base64"))
+  }
+  return result
+}
+
 export const GodotRecordTool = Tool.define("godot_record", {
   description: DESCRIPTION,
   parameters: z.object({
@@ -148,9 +188,42 @@ export const GodotRecordTool = Tool.define("godot_record", {
       }
     }
 
-    // Encode frames to animated GIF
+    // Encode frames to animated GIF, with size limits for the API
+    // Anthropic API has a 5MB base64 limit per image (~3.75MB raw)
+    const MAX_GIF_BASE64_BYTES = 4.8 * 1024 * 1024
+    const MIN_DIMENSION = 512
     try {
-      const gifBase64 = await encodeFramesToGif(frames, params.fps)
+      let gifBase64 = await encodeFramesToGif(frames, params.fps)
+      let currentFrames = frames
+      let downscaled = false
+
+      // If GIF exceeds limit, progressively downscale from original (keep all frames)
+      if (gifBase64.length > MAX_GIF_BASE64_BYTES) {
+        for (const scale of [0.75, 0.5, 0.35, 0.25]) {
+          const scaled = downscaleFrames(frames, scale)
+          if (!scaled) break // non-raw frames, can't downscale
+
+          // Check we haven't gone below the minimum dimension
+          const probe = Buffer.from(scaled[0], "base64")
+          const parsed = tryParseRawRGBA(probe)
+          if (parsed && (parsed.width < MIN_DIMENSION && parsed.height < MIN_DIMENSION)) break
+
+          gifBase64 = await encodeFramesToGif(scaled, params.fps)
+          currentFrames = scaled
+          downscaled = true
+          if (gifBase64.length <= MAX_GIF_BASE64_BYTES) break
+        }
+      }
+
+      // If still too large after maximum downscaling, report error
+      if (gifBase64.length > MAX_GIF_BASE64_BYTES) {
+        const sizeMB = (gifBase64.length / 1024 / 1024).toFixed(1)
+        return {
+          title: "Recording too large",
+          metadata: { error: `GIF ${sizeMB}MB exceeds 5MB API limit` },
+          output: `Recording GIF is ${sizeMB}MB which exceeds the 5MB API image limit. Try recording a shorter duration or lower fps.`,
+        }
+      }
 
       const attachment: MessageV2.FilePart = {
         id: Identifier.ascending("part"),
@@ -161,28 +234,19 @@ export const GodotRecordTool = Tool.define("godot_record", {
         url: `data:image/gif;base64,${gifBase64}`,
       }
 
+      const sizeNote = downscaled ? " (downscaled to fit API limit)" : ""
+
       return {
         title: `Recording: ${frames.length} frames`,
-        metadata: { frameCount: frames.length, fps: params.fps, duration: params.duration_ms },
-        output: `Captured ${frames.length} frames at ${params.fps}fps (${(frames.length / params.fps).toFixed(1)}s). Analyze the animated GIF to verify game behavior.`,
+        metadata: { frameCount: frames.length, fps: params.fps, duration: params.duration_ms, downscaled },
+        output: `Captured ${frames.length} frames at ${params.fps}fps (${(frames.length / params.fps).toFixed(1)}s)${sizeNote}. Analyze the animated GIF to verify game behavior.`,
         attachments: [attachment],
       }
     } catch (err: any) {
-      // GIF encoding failed — return individual frames as PNGs instead
-      const attachments: MessageV2.FilePart[] = frames.slice(0, 5).map((data) => ({
-        id: Identifier.ascending("part"),
-        sessionID: ctx.sessionID,
-        messageID: ctx.messageID,
-        type: "file" as const,
-        mime: "image/png",
-        url: `data:image/png;base64,${data}`,
-      }))
-
       return {
-        title: `Recording: ${frames.length} frames (as PNGs)`,
-        metadata: { frameCount: frames.length, fps: params.fps, gifError: err.message },
-        output: `Captured ${frames.length} frames. GIF encoding failed (${err.message}), returning first ${Math.min(5, frames.length)} frames as individual PNGs.`,
-        attachments,
+        title: "Recording failed",
+        metadata: { error: err.message },
+        output: `GIF encoding failed: ${err.message}`,
       }
     }
   },

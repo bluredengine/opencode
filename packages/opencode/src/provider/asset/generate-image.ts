@@ -33,7 +33,8 @@ export interface GenerateImageResult {
 /**
  * Unified image generation: resolve model → generate → poll → download → write file.
  *
- * Does NOT write metadata or post-process — callers handle that.
+ * Always writes to opts.destPath. The pipeline handles format conversion
+ * during post-processing (GodotImage converts any format to PNG).
  */
 export async function generateImage(opts: GenerateImageOptions): Promise<GenerateImageResult> {
   const pollInterval = opts.pollInterval ?? 2000
@@ -109,13 +110,22 @@ export async function generateImage(opts: GenerateImageOptions): Promise<Generat
     }
   }
 
-  const data = bundle.assets[0].data
-  await fs.mkdir(path.dirname(opts.destPath), { recursive: true })
-  await fs.writeFile(opts.destPath, data)
+  const asset = bundle.assets[0]
+  const data = asset.data
+
+  // Write with the actual extension from provider (may be .jpg even if .png was requested)
+  const actualExt = path.extname(asset.filename || "")
+  const requestedExt = path.extname(opts.destPath)
+  const destPath = actualExt && actualExt !== requestedExt
+    ? opts.destPath.slice(0, -requestedExt.length) + actualExt
+    : opts.destPath
+
+  await fs.mkdir(path.dirname(destPath), { recursive: true })
+  await fs.writeFile(destPath, data)
 
   return {
     success: true,
-    destPath: opts.destPath,
+    destPath,
     generationId: genResult.generationId,
     provider: provider.id,
     model: modelId,

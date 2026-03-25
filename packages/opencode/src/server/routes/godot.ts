@@ -210,12 +210,34 @@ export namespace GodotCommands {
   }
 }
 
+// ── Godot liveness tracking ─────────────────────────────────────────────────
+// When Godot stops polling /commands, auto-shutdown the OpenCode server.
+
+let lastGodotPoll = 0
+let godotConnected = false
+const GODOT_TIMEOUT_MS = 30_000
+
+export function startGodotLivenessCheck() {
+  const interval = setInterval(() => {
+    if (!godotConnected) return // haven't connected yet, don't shut down
+    if (Date.now() - lastGodotPoll > GODOT_TIMEOUT_MS) {
+      log.info("Godot editor stopped polling, shutting down OpenCode server")
+      clearInterval(interval)
+      process.exit(0)
+    }
+  }, 5_000)
+  // Don't keep the process alive just for this timer
+  if (interval.unref) interval.unref()
+}
+
 // ── HTTP Routes ─────────────────────────────────────────────────────────────
 
 export function GodotRoutes() {
   return new Hono()
     // Godot editor polls this endpoint to get pending commands
     .get("/commands", async (c) => {
+      lastGodotPoll = Date.now()
+      godotConnected = true
       const directory = c.req.query("directory") ?? ""
       if (!directory) {
         return c.json([])
@@ -508,19 +530,23 @@ export function GodotRoutes() {
 
       // Scan image files from a directory
       const scanImages = async (absDir: string, resBase: string) => {
-        const images: Array<{ resPath: string; absPath: string; label?: string; tooltip?: string }> = []
+        const images: Array<{ resPath: string; absPath: string; label?: string; tooltip?: string; styleNum?: number }> = []
         try {
           const entries = await fs.readdir(absDir, { withFileTypes: true })
           for (const entry of entries) {
             if (entry.isDirectory()) continue
             if (entry.name.startsWith(".")) continue
             if (/\.(png|jpg|jpeg|webp)$/i.test(entry.name)) {
+              const numMatch = entry.name.match(/^style_(\d+)\./)
               images.push({
                 resPath: `${resBase}/${entry.name}`,
                 absPath: path.join(absDir, entry.name),
+                ...(numMatch ? { styleNum: parseInt(numMatch[1]) } : {}),
               })
             }
           }
+          // Sort by style number so they appear in order
+          images.sort((a, b) => (a.styleNum ?? 0) - (b.styleNum ?? 0))
         } catch {
           // Directory doesn't exist yet
         }
@@ -541,7 +567,8 @@ export function GodotRoutes() {
                 absPath: path.join(absDir, entry.name),
               }
               try {
-                const metaDir = path.join(absDir, `.ai.${entry.name}`)
+                const baseName = path.basename(entry.name, path.extname(entry.name))
+                const metaDir = path.join(absDir, `.ai.${baseName}`)
                 const metaContent = await fs.readFile(path.join(metaDir, "metadata.json"), "utf-8")
                 const meta = JSON.parse(metaContent)
                 if (meta.prompt) {
@@ -573,8 +600,8 @@ export function GodotRoutes() {
         return images
       }
 
-      // Scan exploration sessions (subdirs of .art_exploration/)
-      const explorationBase = path.join(projectRoot, "assets", ".art_exploration")
+      // Scan exploration sessions (subdirs of art_exploration/)
+      const explorationBase = path.join(projectRoot, "assets", "art_exploration")
       const sessions: Array<{ id: string; images: Array<{ resPath: string; absPath: string }> }> = []
 
       try {
@@ -588,7 +615,7 @@ export function GodotRoutes() {
             sessionDirs.push(entry.name)
           } else if (!entry.isDirectory() && !entry.name.startsWith(".") && /\.(png|jpg|jpeg|webp)$/i.test(entry.name)) {
             looseImages.push({
-              resPath: `res://assets/.art_exploration/${entry.name}`,
+              resPath: `res://assets/art_exploration/${entry.name}`,
               absPath: path.join(explorationBase, entry.name),
             })
           }
@@ -598,7 +625,7 @@ export function GodotRoutes() {
         sessionDirs.sort((a, b) => b.localeCompare(a))
 
         for (const dir of sessionDirs) {
-          const imgs = await scanImages(path.join(explorationBase, dir), `res://assets/.art_exploration/${dir}`)
+          const imgs = await scanImages(path.join(explorationBase, dir), `res://assets/art_exploration/${dir}`)
           if (imgs.length > 0) {
             sessions.push({ id: dir, images: imgs })
           }
@@ -609,7 +636,7 @@ export function GodotRoutes() {
           sessions.push({ id: "default", images: looseImages })
         }
       } catch {
-        // .art_exploration doesn't exist yet
+        // art_exploration doesn't exist yet
       }
 
       const cornerstone = await scanCornerstone(
