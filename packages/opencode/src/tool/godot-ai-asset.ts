@@ -10,7 +10,6 @@ import { readProfile, writeProfile } from "../provider/asset/style-profile"
 import type { StyleProfile } from "../provider/asset/style-profile"
 import { getModelDefaults } from "../config/model-defaults"
 import { getImageModel } from "../server/routes/ai-assets"
-import { generateImage } from "../provider/asset/generate-image"
 import { GodotAssetPipelineTool } from "./godot-asset-pipeline"
 
 // =============================================================================
@@ -630,7 +629,7 @@ export const GodotAssetRefinePromptTool = Tool.define("godot_asset_refine_prompt
 export const GodotAssetListModelsTool = Tool.define("godot_asset_list_models", {
   description: "List available AI models for asset generation, optionally filtered by provider or type.",
   parameters: z.object({
-    provider: z.string().optional().describe("Filter by provider (e.g., meshy, doubao, suno)"),
+    provider: z.string().optional().describe("Filter by provider (e.g., meshy, volcengine, suno)"),
     type: z
       .enum(["texture", "model", "audio_sfx", "audio_music", "shader", "font"])
       .optional()
@@ -819,55 +818,96 @@ export const GodotArtExploreTool = Tool.define("godot_art_explore", {
 
     // Create a session subfolder with timestamp
     const sessionId = `session_${new Date().toISOString().replace(/[-:T]/g, "").replace(/\..+/, "").replace(/(\d{8})(\d{6})/, "$1_$2")}`
-    const explorationDir = path.join(projectRoot, "assets", ".art_exploration", sessionId)
+    const explorationDir = path.join(projectRoot, "assets", "art_exploration", sessionId)
     await fs.mkdir(explorationDir, { recursive: true })
 
-    const results: Array<{ style: string; resPath: string; status: string }> = []
+    // Find the highest existing style number across all sessions for globally unique numbering
+    const explorationBase = path.join(projectRoot, "assets", "art_exploration")
+    let maxStyleNum = 0
+    try {
+      const dirs = await fs.readdir(explorationBase, { withFileTypes: true })
+      for (const d of dirs) {
+        if (!d.isDirectory() || !d.name.startsWith("session_")) continue
+        const files = await fs.readdir(path.join(explorationBase, d.name))
+        for (const f of files) {
+          const m = f.match(/^style_(\d+)\./)
+          if (m) maxStyleNum = Math.max(maxStyleNum, parseInt(m[1]))
+        }
+      }
+    } catch { /* no sessions yet */ }
+
+    // Convert aspect_ratio string (e.g. "16:9") to pixel dimensions for the generation API
+    const [exploreArW, exploreArH] = params.aspect_ratio.split(":").map(Number)
+    let exploreWidth: number | undefined
+    let exploreHeight: number | undefined
+    if (exploreArW && exploreArH) {
+      if (exploreArW >= exploreArH) {
+        exploreWidth = 1024
+        exploreHeight = Math.round(1024 * (exploreArH / exploreArW))
+      } else {
+        exploreHeight = 1024
+        exploreWidth = Math.round(1024 * (exploreArW / exploreArH))
+      }
+    }
+
+    const results: Array<{ style: string; resPath: string; status: string; globalNum: number }> = []
 
     ctx.metadata({ title: `Generating style explorations (0/${styleList.length})...` })
+
+    const pipeline = await GodotAssetPipelineTool.init()
 
     for (let i = 0; i < styleList.length; i++) {
       const style = styleList[i]
       const prompt = buildExplorationPrompt(style, layout, params.game_description, worldContext)
-      const filename = `style_${i + 1}.png`
-      const destPath = path.join(explorationDir, filename)
-      const resPath = `res://assets/.art_exploration/${sessionId}/${filename}`
+      const globalNum = maxStyleNum + i + 1
+      const filename = `style_${globalNum}.png`
+      const resPath = `res://assets/art_exploration/${sessionId}/${filename}`
 
       ctx.metadata({ title: `Generating style ${i + 1}/${styleList.length}: ${style.split(" ").slice(0, 3).join(" ")}...` })
 
       try {
-        const result = await generateImage({
-          type: "texture",
+        const result = await pipeline.execute({
           prompt,
+          destination: resPath,
+          asset_type: "texture",
+          requirements: { match_size: false, min_score: 5 },
           model: params.model ?? await getImageModel(),
-          parameters: {
-            aspect_ratio: params.aspect_ratio,
-            ...(params.reference_image ? { input_image: params.reference_image } : {}),
+          reference_image: params.reference_image,
+          use_project_style: false,
+          attempt: 1,
+          max_retries: 1,
+          usage: {
+            role: `style exploration ${globalNum}`,
+            transparent_bg: false,
+            tiling: "none" as const,
+            ...(exploreWidth && exploreHeight ? { width: exploreWidth, height: exploreHeight } : {}),
           },
-          destPath,
-          abortSignal: ctx.abort,
-        })
+        }, ctx)
 
-        if (result.success) {
-          results.push({ style, resPath, status: "ready" })
+        const meta = result.metadata as Record<string, any>
+        if (!meta.error) {
+          // Pipeline may change extension; read actual path from metadata
+          const finalResPath = (meta.resPath as string) ?? resPath
+          results.push({ style, resPath: finalResPath, status: "ready", globalNum })
           ctx.metadata({ title: `Style ${i + 1}/${styleList.length} done ✓ — generating next...` })
         } else {
-          results.push({ style, resPath, status: result.error ?? "failed" })
+          results.push({ style, resPath, status: meta.error ?? "failed", globalNum })
           ctx.metadata({ title: `Style ${i + 1}/${styleList.length} failed — continuing...` })
         }
       } catch (err: any) {
-        results.push({ style, resPath, status: `error: ${err.message}` })
+        results.push({ style, resPath, status: `error: ${err.message}`, globalNum })
         ctx.metadata({ title: `Style ${i + 1}/${styleList.length} error — continuing...` })
       }
     }
 
     const readyCount = results.filter((r) => r.status === "ready").length
-    const styleList2 = results.map((r, i) => `  Style ${i + 1} (${r.style.split(" ").slice(0, 3).join(" ")}) → ${r.resPath} [${r.status}]`).join("\n")
+    const styleList2 = results.map((r) => `  Style ${r.globalNum} (${r.style.split(" ").slice(0, 3).join(" ")}) → ${r.resPath} [${r.status}]`).join("\n")
+    const nums = results.map((r) => r.globalNum).join(", ")
 
     return {
       title: `Generated ${readyCount}/${styleList.length} style explorations`,
       metadata: { explorations: results },
-      output: `Generated ${readyCount} Key Art style explorations (${params.game_description}):\n${styleList2}\n\nEach image is a concept art scene showing the game's visual style (no UI elements — UI is generated separately in Cornerstone Assets).\nView and select your preferred style in the **Art Director** panel.\nTell me which style number you prefer (1-${styleList.length}).`,
+      output: `Generated ${readyCount} Key Art style explorations (${params.game_description}):\n${styleList2}\n\nEach image is a concept art scene showing the game's visual style (no UI elements — UI is generated separately in Cornerstone Assets).\nView and select your preferred style in the **Art Director** panel.\nTell me which style number you prefer (${nums}).`,
     }
   },
 })
@@ -903,6 +943,20 @@ export const GodotArtRefineTool = Tool.define("godot_art_refine", {
     ctx.metadata({ title: `Refining: ${path.basename(refResPath)}...` })
 
     try {
+      // Read reference image dimensions to preserve aspect ratio
+      const absRefPath = refResPath.startsWith("res://")
+        ? path.join(Instance.directory, refResPath.slice(6))
+        : refResPath
+      let refWidth: number | undefined
+      let refHeight: number | undefined
+      try {
+        const { GodotImage } = await import("../util/godot-image")
+        const imgBuf = Buffer.from(await fs.readFile(absRefPath))
+        const meta = await GodotImage.metadata(imgBuf)
+        refWidth = meta.width
+        refHeight = meta.height
+      } catch { /* couldn't read dimensions — proceed without */ }
+
       const pipeline = await GodotAssetPipelineTool.init()
       const result = await pipeline.execute({
         prompt: params.prompt,
@@ -920,6 +974,7 @@ export const GodotArtRefineTool = Tool.define("godot_art_refine", {
           role: "art refinement",
           transparent_bg: false,
           tiling: "none" as const,
+          ...(refWidth && refHeight ? { width: refWidth, height: refHeight } : {}),
         },
       }, ctx)
 
@@ -976,7 +1031,11 @@ function buildExplorationPrompt(style: string, layout: string, theme: string, wo
 
 const ART_CONFIRM_DESCRIPTION = `Read the user's chosen style exploration image and return it for visual analysis.
 
-After the user selects a style number from godot_art_explore results, call this tool with the chosen image path. The tool returns the image content so you (the LLM) can analyze it with vision to:
+After the user selects a style number from godot_art_explore results, call this tool with either:
+- style_number: the number the user chose (1, 2, 3, ...) — auto-resolves to the correct image from the latest exploration session
+- chosen_path: explicit res:// path (alternative to style_number)
+
+The tool returns the image content so you (the LLM) can analyze it with vision to:
 1. Extract color palette (HEX values)
 2. Describe line style, lighting rules, character proportions
 3. Write docs/visual_bible.md with these rules
@@ -987,12 +1046,56 @@ This tool MUST be followed by writing visual_bible.md and calling godot_style_se
 export const GodotArtConfirmTool = Tool.define("godot_art_confirm", {
   description: ART_CONFIRM_DESCRIPTION,
   parameters: z.object({
-    chosen_path: z.string().describe("res:// path to the chosen exploration image"),
+    style_number: z.number().optional().describe("Style number chosen by the user (1, 2, 3, ...). Auto-resolves to the image from the latest exploration session."),
+    chosen_path: z.string().optional().describe("res:// path to the chosen exploration image (alternative to style_number)"),
     game_description: z.string().describe("Game description for context"),
   }),
   async execute(params, ctx) {
     const projectRoot = Instance.directory
-    let absPath = params.chosen_path
+
+    // Resolve style_number to chosen_path by searching ALL sessions for style_N.*
+    let chosenPath = params.chosen_path
+    if (!chosenPath && params.style_number) {
+      const explorationBase = path.join(projectRoot, "assets", "art_exploration")
+      try {
+        const entries = await fs.readdir(explorationBase, { withFileTypes: true })
+        const sessionDirs = entries
+          .filter((e) => e.isDirectory() && e.name.startsWith("session_"))
+          .map((e) => e.name)
+
+        for (const dir of sessionDirs) {
+          const files = await fs.readdir(path.join(explorationBase, dir))
+          const match = files.find((f) => {
+            const m = f.match(/^style_(\d+)\./)
+            return m && parseInt(m[1]) === params.style_number
+          })
+          if (match) {
+            chosenPath = `res://assets/art_exploration/${dir}/${match}`
+            break
+          }
+        }
+      } catch {
+        // Fall through to error below
+      }
+
+      if (!chosenPath) {
+        return {
+          title: "Art confirm failed",
+          metadata: { error: `Style ${params.style_number} not found` },
+          output: `Error: Could not find style ${params.style_number} in the latest exploration session. Try providing the full res:// path instead.`,
+        }
+      }
+    }
+
+    if (!chosenPath) {
+      return {
+        title: "Art confirm failed",
+        metadata: { error: "No style_number or chosen_path provided" },
+        output: "Error: Provide either style_number or chosen_path.",
+      }
+    }
+
+    let absPath = chosenPath
     if (absPath.startsWith("res://")) {
       absPath = path.join(projectRoot, absPath.slice(6))
     }
@@ -1000,22 +1103,24 @@ export const GodotArtConfirmTool = Tool.define("godot_art_confirm", {
     try {
       const imgData = await fs.readFile(absPath)
       const base64 = imgData.toString("base64")
-      const dataUrl = `data:image/png;base64,${base64}`
+      const ext = path.extname(absPath).toLowerCase()
+      const mime = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : ext === ".webp" ? "image/webp" : "image/png"
+      const dataUrl = `data:${mime};base64,${base64}`
 
       return {
         title: `Loaded style reference: ${path.basename(absPath)}`,
         metadata: {
-          chosen_path: params.chosen_path,
+          chosen_path: chosenPath,
           game_description: params.game_description,
           image_data: dataUrl,
         },
-        output: `Style image loaded: ${params.chosen_path} (${imgData.length} bytes)\n\nGame: ${params.game_description}\n\nPlease analyze this image to extract:\n1. Color palette (provide HEX values for main colors)\n2. Art style description (line weight, shading, pixel density, etc.)\n3. Lighting and shadow rules\n4. Character/object proportions\n\nThen:\n- Write docs/visual_bible.md with these visual rules\n- Call godot_style_set with reference_asset="${params.chosen_path}" and art_direction="[your style description]"\n\nImage data is available in the metadata.image_data field for vision analysis.`,
+        output: `Style image loaded: ${chosenPath} (${imgData.length} bytes)\n\nGame: ${params.game_description}\n\nPlease analyze this image to extract:\n1. Color palette (provide HEX values for main colors)\n2. Art style description (line weight, shading, pixel density, etc.)\n3. Lighting and shadow rules\n4. Character/object proportions\n\nThen:\n- Write docs/visual_bible.md with these visual rules\n- Call godot_style_set with reference_asset="${chosenPath}" and art_direction="[your style description]"\n\nImage data is available in the metadata.image_data field for vision analysis.`,
       }
     } catch (err: any) {
       return {
         title: "Art confirm failed",
         metadata: { error: err.message },
-        output: `Error: Could not read image at ${params.chosen_path}: ${err.message}`,
+        output: `Error: Could not read image at ${chosenPath}: ${err.message}`,
       }
     }
   },
@@ -1203,6 +1308,21 @@ export const GodotCornerstoneGenerateTool = Tool.define("godot_cornerstone_gener
       }
     }
 
+    // Convert aspect_ratio string (e.g. "16:9") to pixel dimensions for the generation API
+    const [arW, arH] = params.aspect_ratio.split(":").map(Number)
+    let genWidth: number | undefined
+    let genHeight: number | undefined
+    if (arW && arH) {
+      // Use 1024px on the longer side to get a high-quality cornerstone
+      if (arW >= arH) {
+        genWidth = 1024
+        genHeight = Math.round(1024 * (arH / arW))
+      } else {
+        genHeight = 1024
+        genWidth = Math.round(1024 * (arW / arH))
+      }
+    }
+
     // Delegate to asset pipeline (no post-processing for cornerstones)
     const pipeline = await GodotAssetPipelineTool.init()
     const result = await pipeline.execute({
@@ -1220,6 +1340,7 @@ export const GodotCornerstoneGenerateTool = Tool.define("godot_cornerstone_gener
         role: `${params.asset_type} cornerstone (${params.aspect_ratio})`,
         transparent_bg: false,
         tiling: "none" as const,
+        ...(genWidth && genHeight ? { width: genWidth, height: genHeight } : {}),
       },
     }, ctx)
 
@@ -1410,7 +1531,7 @@ function generateBoxGLB(color: [number, number, number, number]): Buffer {
   const baseColor = [color[0] / 255, color[1] / 255, color[2] / 255, color[3] / 255]
 
   const gltf = {
-    asset: { version: "2.0", generator: "makabaka-engine" },
+    asset: { version: "2.0", generator: "blured-engine" },
     scene: 0,
     scenes: [{ nodes: [0] }],
     nodes: [{ mesh: 0, name: "Placeholder" }],

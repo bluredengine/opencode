@@ -478,6 +478,16 @@ export namespace ProviderTransform {
         // https://v5.ai-sdk.dev/providers/ai-sdk-providers/google-generative-ai
         if (id.includes("2.5")) {
           return {
+            minimal: {
+              thinkingConfig: {
+                thinkingBudget: 0,
+              },
+            },
+            low: {
+              thinkingConfig: {
+                thinkingBudget: 0,
+              },
+            },
             high: {
               thinkingConfig: {
                 includeThoughts: true,
@@ -493,11 +503,13 @@ export namespace ProviderTransform {
           }
         }
         return Object.fromEntries(
-          ["low", "high"].map((effort) => [
+          ["minimal", "low", "high"].map((effort) => [
             effort,
             {
-              includeThoughts: true,
-              thinkingLevel: effort,
+              thinkingConfig: {
+                includeThoughts: effort !== "minimal",
+                thinkingLevel: effort,
+              },
             },
           ]),
         )
@@ -573,14 +585,8 @@ export namespace ProviderTransform {
       result["promptCacheKey"] = input.sessionID
     }
 
-    if (input.model.api.npm === "@ai-sdk/google" || input.model.api.npm === "@ai-sdk/google-vertex") {
-      result["thinkingConfig"] = {
-        includeThoughts: true,
-      }
-      if (input.model.api.id.includes("gemini-3")) {
-        result["thinkingConfig"]["thinkingLevel"] = "high"
-      }
-    }
+    // Google thinking is controlled by variants (from AA Think toggle)
+    // Do not set default thinkingConfig here — let the variant control it
 
     if (input.model.api.id.includes("gpt-5") && !input.model.api.id.includes("gpt-5-chat")) {
       if (!input.model.api.id.includes("gpt-5-pro")) {

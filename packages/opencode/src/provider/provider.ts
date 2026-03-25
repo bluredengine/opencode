@@ -506,6 +506,12 @@ export namespace Provider {
         },
       }
     },
+    volcengine: async () => {
+      return {
+        autoload: false,
+        options: {},
+      }
+    },
   }
 
   export const Model = z

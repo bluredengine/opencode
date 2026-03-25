@@ -798,14 +798,16 @@ export namespace SessionPrompt {
             textParts.push(contentItem.text)
           } else if (contentItem.type === "image") {
             const compressed = await compressImageBase64(contentItem.data, contentItem.mimeType)
-            attachments.push({
-              id: Identifier.ascending("part"),
-              sessionID: input.session.id,
-              messageID: input.processor.message.id,
-              type: "file",
-              mime: compressed.mime,
-              url: `data:${compressed.mime};base64,${compressed.data}`,
-            })
+            if (compressed) {
+              attachments.push({
+                id: Identifier.ascending("part"),
+                sessionID: input.session.id,
+                messageID: input.processor.message.id,
+                type: "file",
+                mime: compressed.mime,
+                url: `data:${compressed.mime};base64,${compressed.data}`,
+              })
+            }
           } else if (contentItem.type === "resource") {
             const { resource } = contentItem
             if (resource.text) {
@@ -967,7 +969,15 @@ export namespace SessionPrompt {
                   },
                 ]
               }
-              break
+              // Non-text data URLs (images, etc.) — pass through as file parts
+              return [
+                {
+                  ...part,
+                  id: part.id ?? Identifier.ascending("part"),
+                  messageID: info.id,
+                  sessionID: input.sessionID,
+                },
+              ]
             case "file:":
               log.info("file", { mime: part.mime })
               // have to normalize, symbol search returns absolute paths

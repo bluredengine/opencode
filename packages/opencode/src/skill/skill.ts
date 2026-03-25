@@ -123,7 +123,7 @@ export namespace Skill {
       }
     }
 
-    // Scan engine prompts/skills/ directory (Makabaka Engine bundled skills)
+    // Scan engine prompts/skills/ directory (Blured Engine bundled skills)
     // Walk up from OpenCode source to find the engine root containing prompts/
     let candidate = path.resolve(__dirname)
     for (let i = 0; i < 8; i++) {

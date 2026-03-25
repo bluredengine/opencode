@@ -355,6 +355,11 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
     await fs.mkdir(path.dirname(destPath), { recursive: true })
     await fs.writeFile(destPath, imageBuffer)
 
+    // Clean up intermediate file if generateImage wrote with a different extension (e.g. .jpg)
+    if (genResult.destPath !== destPath) {
+      await fs.unlink(genResult.destPath).catch(() => {})
+    }
+
     // Save both raw (from AI model) and processed (final) into version dir
     // Determine next version number from existing history (not from attempt)
     const verIndex0 = (await AssetMetadata.readVersionIndex(destPath)) ?? {}
@@ -367,8 +372,9 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
     const verDir = AssetMetadata.getVersionDir(destPath)
     await fs.mkdir(verDir, { recursive: true })
     const ext = path.extname(destPath)
-    // Raw = direct output from AI model (before any post-processing)
-    await fs.writeFile(path.join(verDir, `v${version}_raw${ext}`), genResult.data)
+    const rawExt = path.extname(genResult.destPath)
+    // Raw = direct output from AI model (before any post-processing), keep original format
+    await fs.writeFile(path.join(verDir, `v${version}_raw${rawExt}`), genResult.data)
     // Processed = after remove_bg + trim + resize + pad
     await fs.writeFile(path.join(verDir, `v${version}${ext}`), imageBuffer)
 

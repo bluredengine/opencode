@@ -439,6 +439,14 @@ export namespace MessageV2 {
     const result: UIMessage[] = []
     const toolNames = new Set<string>()
 
+    // Only keep images from the last N user turns to prevent context overflow (413 errors)
+    const MAX_IMAGE_TURNS = 1
+    const userMsgIndices = input
+      .map((msg, i) => (msg.info.role === "user" ? i : -1))
+      .filter((i) => i !== -1)
+    const imageKeepThreshold =
+      userMsgIndices.length > MAX_IMAGE_TURNS ? userMsgIndices[userMsgIndices.length - MAX_IMAGE_TURNS] : 0
+
     const toModelOutput = (output: unknown) => {
       if (typeof output === "string") {
         return { type: "text", value: output }
@@ -472,8 +480,10 @@ export namespace MessageV2 {
       return { type: "json", value: output as never }
     }
 
-    for (const msg of input) {
+    for (let msgIndex = 0; msgIndex < input.length; msgIndex++) {
+      const msg = input[msgIndex]
       if (msg.parts.length === 0) continue
+      const isOldTurn = msgIndex < imageKeepThreshold
 
       if (msg.info.role === "user") {
         const userMessage: UIMessage = {
@@ -490,12 +500,21 @@ export namespace MessageV2 {
             })
           // text/plain and directory files are converted into text parts, ignore them
           if (part.type === "file" && part.mime !== "text/plain" && part.mime !== "application/x-directory") {
+            // Strip images from old turns to prevent context overflow
+            if (part.mime.startsWith("image/") && isOldTurn) {
+              userMessage.parts.push({
+                type: "text",
+                text: `[Image: ${part.filename ?? "image"} was attached here]`,
+              })
+              continue
+            }
             let url = part.url
             let mime = part.mime
             // Compress images that exceed the API size limit
             if (mime.startsWith("image/") && url.startsWith("data:")) {
               const { compressDataUrl } = await import("../util/image")
               const compressed = await compressDataUrl(url)
+              if (!compressed) continue // drop images that can't be compressed under the limit
               url = compressed.url
               mime = compressed.mime || mime
             }
@@ -554,18 +573,19 @@ export namespace MessageV2 {
             toolNames.add(part.tool)
             if (part.state.status === "completed") {
               const outputText = part.state.time.compacted ? "[Old tool result content cleared]" : part.state.output
-              const rawAttachments = part.state.time.compacted ? [] : (part.state.attachments ?? [])
+              const rawAttachments = part.state.time.compacted || isOldTurn ? [] : (part.state.attachments ?? [])
               // Pre-compress oversized image attachments before they reach the sync toModelOutput
               const { compressDataUrl } = await import("../util/image")
-              const attachments = await Promise.all(
+              const attachments = (await Promise.all(
                 rawAttachments.map(async (att: { mime: string; url: string; [k: string]: unknown }) => {
                   if (att.mime.startsWith("image/") && att.url.startsWith("data:")) {
                     const compressed = await compressDataUrl(att.url)
+                    if (!compressed) return null // drop images that can't be compressed under the limit
                     return { ...att, url: compressed.url, mime: compressed.mime || att.mime }
                   }
                   return att
                 }),
-              )
+              )).filter((att): att is NonNullable<typeof att> => att !== null)
               const output =
                 attachments.length > 0
                   ? {

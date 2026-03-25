@@ -104,15 +104,13 @@ export namespace AssetMetadata {
       const fullPath = path.join(dir, entry.name)
       if (entry.isDirectory()) {
         if (entry.name.startsWith(".ai.")) {
-          // .ai.{filename} → check if {filename} exists in same dir
-          const assetName = entry.name.slice(4) // strip ".ai."
-          const assetPath = path.join(dir, assetName)
-          try {
-            await fs.access(assetPath)
-          } catch {
+          // .ai.{name} → check if any file with that base name exists in same dir
+          const baseName = entry.name.slice(4) // strip ".ai."
+          const siblings = entries.filter(e => !e.isDirectory() && path.basename(e.name, path.extname(e.name)) === baseName)
+          if (siblings.length === 0) {
             // Asset gone — remove orphaned metadata
             await fs.rm(fullPath, { recursive: true, force: true })
-            cleaned.push(assetPath)
+            cleaned.push(path.join(dir, baseName))
           }
         } else {
           // Recurse into non-metadata directories
@@ -124,11 +122,11 @@ export namespace AssetMetadata {
 
   // ── Version History (.ai.{filename}/ folder) ────────────────────────
 
-  /** Get hidden version dir: dir/.ai.filename/ */
+  /** Get hidden version dir: dir/.ai.{name}/ (extension-agnostic) */
   export function getVersionDir(assetPath: string): string {
     const dir = path.dirname(assetPath)
-    const file = path.basename(assetPath)
-    return path.join(dir, `.ai.${file}`)
+    const name = path.basename(assetPath, path.extname(assetPath))
+    return path.join(dir, `.ai.${name}`)
   }
 
   /** Get version asset path: dir/.ai.filename/vN.ext */

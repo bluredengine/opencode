@@ -3,7 +3,7 @@ import { Config } from "../../config/config"
 import { Auth } from "../../auth"
 import { AssetProvider } from "./asset-provider"
 import { MeshyProvider } from "./meshy"
-import { DoubaoProvider } from "./doubao"
+import { VolcengineProvider } from "./volcengine"
 import { SunoProvider } from "./suno"
 import { ReplicateProvider } from "./replicate"
 import { GeminiProvider } from "./gemini"
@@ -29,7 +29,7 @@ export namespace AssetProviderRegistry {
   > = {
     replicate: (config) => new ReplicateProvider(config),
     meshy: (config) => new MeshyProvider(config),
-    doubao: (config) => new DoubaoProvider(config),
+    volcengine: (config) => new VolcengineProvider(config),
     suno: (config) => new SunoProvider(config),
     google: (config) => new GeminiProvider(config),
   }
@@ -71,48 +71,54 @@ export namespace AssetProviderRegistry {
   // ── Initialization from config ───────────────────────────────────────
 
   export async function initFromConfig(): Promise<void> {
-    const config = await Config.get()
-    const assetConfig = (config as any).asset_provider as
-      | Record<string, AssetProvider.ProviderConfig>
-      | undefined
+    // Config.get() requires an Instance context which may not exist at server startup.
+    // Wrap in try/catch so auto-discovery from auth.json still runs.
+    try {
+      const config = await Config.get()
+      const assetConfig = (config as any).asset_provider as
+        | Record<string, AssetProvider.ProviderConfig>
+        | undefined
 
-    if (assetConfig) {
-      for (const [providerId, providerConfig] of Object.entries(assetConfig)) {
-        if (providerConfig.enabled === false) {
-          log.info("asset provider disabled", { id: providerId })
-          continue
-        }
-
-        const factory = BUILTIN_FACTORIES[providerId]
-        if (!factory) {
-          log.warn("unknown asset provider", { id: providerId })
-          continue
-        }
-
-        // Resolve API key: config > env var > auth.json
-        let apiKey = providerConfig.api_key
-          ?? (providerConfig.api_key_env ? process.env[providerConfig.api_key_env] : undefined)
-        if (!apiKey) {
-          const authInfo = await Auth.get(providerId)
-          if (authInfo?.type === "api") {
-            apiKey = authInfo.key
+      if (assetConfig) {
+        for (const [providerId, providerConfig] of Object.entries(assetConfig)) {
+          if (providerConfig.enabled === false) {
+            log.info("asset provider disabled", { id: providerId })
+            continue
           }
-        }
-        if (!apiKey) {
-          log.warn("asset provider missing API key", {
-            id: providerId,
-            env: providerConfig.api_key_env ?? "(not configured)",
+
+          const factory = BUILTIN_FACTORIES[providerId]
+          if (!factory) {
+            log.warn("unknown asset provider", { id: providerId })
+            continue
+          }
+
+          // Resolve API key: config > env var > auth.json
+          let apiKey = providerConfig.api_key
+            ?? (providerConfig.api_key_env ? process.env[providerConfig.api_key_env] : undefined)
+          if (!apiKey) {
+            const authInfo = await Auth.get(providerId)
+            if (authInfo?.type === "api") {
+              apiKey = authInfo.key
+            }
+          }
+          if (!apiKey) {
+            log.warn("asset provider missing API key", {
+              id: providerId,
+              env: providerConfig.api_key_env ?? "(not configured)",
+            })
+            continue
+          }
+
+          const provider = factory({
+            apiKey,
+            apiUrl: providerConfig.api_url,
           })
-          continue
+
+          register(provider)
         }
-
-        const provider = factory({
-          apiKey,
-          apiUrl: providerConfig.api_url,
-        })
-
-        register(provider)
       }
+    } catch (e: any) {
+      log.warn("could not read asset_provider config, skipping config-based registration", { error: e.message })
     }
 
     // Auto-discover: register any provider that has a key in auth.json

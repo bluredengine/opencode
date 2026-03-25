@@ -103,9 +103,10 @@ export const GodotScreenshotTool = Tool.define("godot_screenshot", {
     }
 
     // Compress screenshots if needed (Anthropic API has 5MB limit per image)
-    const attachments: MessageV2.FilePart[] = await Promise.all(
+    const attachments: MessageV2.FilePart[] = (await Promise.all(
       results.map(async (data) => {
         const compressed = await compressImageBase64(data, "image/png")
+        if (!compressed) return null
         return {
           id: Identifier.ascending("part"),
           sessionID: ctx.sessionID,
@@ -115,7 +116,7 @@ export const GodotScreenshotTool = Tool.define("godot_screenshot", {
           url: `data:${compressed.mime};base64,${compressed.data}`,
         }
       }),
-    )
+    )).filter((att): att is NonNullable<typeof att> => att !== null)
 
     const focusLine = params.focus ? `\nFocus area: **${params.focus}**\n` : ""
     const countLabel = params.count > 1 ? `${params.count} frames captured` : "Screenshot captured"

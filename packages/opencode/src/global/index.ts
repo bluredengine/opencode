@@ -3,9 +3,9 @@ import { xdgData, xdgCache, xdgConfig, xdgState } from "xdg-basedir"
 import path from "path"
 import os from "os"
 
-const app = "redblue"
+const app = "blured"
 
-// On Windows, use %LOCALAPPDATA% (e.g. C:\Users\X\AppData\Local\redblue\)
+// On Windows, use %LOCALAPPDATA% (e.g. C:\Users\X\AppData\Local\blured\)
 // instead of ~/.local/share which is a Unix convention.
 const localAppData = process.platform === "win32" ? process.env.LOCALAPPDATA : undefined
 const winBase = localAppData ? path.join(localAppData, app) : undefined
@@ -28,6 +28,19 @@ export namespace Global {
     config,
     state,
   }
+}
+
+// Migrate from old "redblue" data directory if it exists and new one doesn't
+const oldApp = "redblue"
+const oldBase = localAppData ? path.join(localAppData, oldApp) : undefined
+if (oldBase && winBase) {
+  try {
+    const oldExists = await fs.stat(oldBase).then(() => true).catch(() => false)
+    const newExists = await fs.stat(winBase).then(() => true).catch(() => false)
+    if (oldExists && !newExists) {
+      await fs.rename(oldBase, winBase)
+    }
+  } catch {}
 }
 
 await Promise.all([

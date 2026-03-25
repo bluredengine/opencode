@@ -3,14 +3,14 @@ import { AssetProvider } from "./asset-provider"
 import { getModelDefaults } from "../../config/model-defaults"
 
 /**
- * Doubao (ByteDance Seedream) provider for 2D image/texture generation.
+ * Volcengine (ByteDance Seedream) provider for 2D image/texture generation.
  *
  * Uses Volcano Engine visual generation API.
  * Supports text-to-image and image editing via Seedream models.
  */
-export class DoubaoProvider implements AssetProvider.Provider {
-  readonly id = "doubao"
-  readonly name = "Doubao (ByteDance)"
+export class VolcengineProvider implements AssetProvider.Provider {
+  readonly id = "volcengine"
+  readonly name = "Volcengine (ByteDance)"
   readonly supportedTypes: AssetProvider.AssetType[] = [
     "texture",
     "sprite",
@@ -20,7 +20,7 @@ export class DoubaoProvider implements AssetProvider.Provider {
 
   private apiUrl: string
   private apiKey: string
-  private log = Log.create({ service: "asset.doubao" })
+  private log = Log.create({ service: "asset.volcengine" })
 
   constructor(config: { apiKey: string; apiUrl?: string }) {
     this.apiKey = config.apiKey
@@ -97,7 +97,7 @@ export class DoubaoProvider implements AssetProvider.Provider {
   }
 
   async generate(request: AssetProvider.GenerationRequest): Promise<AssetProvider.GenerationResult> {
-    const model = request.model ?? getModelDefaults().image_doubao
+    const model = request.model ?? getModelDefaults().image_volcengine
 
     const body: Record<string, unknown> = {
       model,
@@ -116,7 +116,7 @@ export class DoubaoProvider implements AssetProvider.Provider {
 
     const response = await this.request("POST", "/images/generations", body)
 
-    // Doubao may return synchronously or async depending on the endpoint
+    // Volcengine may return synchronously or async depending on the endpoint
     if (response.data?.[0]?.url) {
       // Synchronous result
       return {
@@ -206,7 +206,7 @@ export class DoubaoProvider implements AssetProvider.Provider {
 
     let endpoint: string
     const body: Record<string, unknown> = {
-      model: request.model ?? getModelDefaults().image_doubao,
+      model: request.model ?? getModelDefaults().image_volcengine,
       image: imageBase64,
     }
 
@@ -226,7 +226,7 @@ export class DoubaoProvider implements AssetProvider.Provider {
         body.n = request.parameters.num_images ?? 1
         break
       default:
-        throw new Error(`Doubao does not support transform: ${request.transform}`)
+        throw new Error(`Volcengine does not support transform: ${request.transform}`)
     }
 
     this.log.info("creating transform task", { transform: request.transform })
@@ -258,8 +258,8 @@ export class DoubaoProvider implements AssetProvider.Provider {
 
     if (!response.ok) {
       const text = await response.text()
-      this.log.error("doubao api error", { status: response.status, body: text })
-      throw new Error(`Doubao API error ${response.status}: ${text}`)
+      this.log.error("volcengine api error", { status: response.status, body: text })
+      throw new Error(`Volcengine API error ${response.status}: ${text}`)
     }
 
     return response.json()
