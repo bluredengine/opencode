@@ -171,7 +171,7 @@ export class GeminiProvider implements AssetProvider.Provider {
         for (const part of candidate.content?.parts ?? []) {
           const inlineData = part.inlineData ?? part.inline_data
           if (inlineData?.data) {
-            const mime = inlineData.mimeType ?? (inlineData as any).mime_type ?? ""
+            const mime = (inlineData as any).mimeType ?? (inlineData as any).mime_type ?? ""
             if (mime && mime !== "image/png") {
               this.log.error("Gemini returned non-PNG image despite outputMimeType=image/png", { mimeType: mime })
             }
