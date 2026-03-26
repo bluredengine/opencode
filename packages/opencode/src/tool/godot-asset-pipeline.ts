@@ -505,7 +505,7 @@ DECIDE:
         raw_dimensions: `${rawMeta.width}x${rawMeta.height}`,
         final_dimensions: `${finalMeta.width}x${finalMeta.height}`,
         post_processing: postProcessingLog,
-        format: finalMeta.format,
+        format: (finalMeta as any).format,
         generation_id: genResult.generationId,
         provider: provider.id,
         model: modelId,
